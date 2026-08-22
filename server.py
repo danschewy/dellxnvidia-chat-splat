@@ -75,6 +75,8 @@ def browser_config() -> JSONResponse:
             "blur_threshold", "frames_per_client", "capture_seconds", "capture_fps",
             "jpeg_quality", "capture_width", "motion_rotation_threshold",
             "motion_translation_threshold", "point_size",
+            "splat_max_screen_size",
+            "splat_exposure",
         )
     }
     return JSONResponse(exposed, headers={"Cache-Control": "no-store"})

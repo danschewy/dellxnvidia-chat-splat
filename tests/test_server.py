@@ -37,6 +37,8 @@ class ServerTests(unittest.TestCase):
         config = self.client.get("/api/config").json()
         self.assertEqual(config["capture_seconds"], 15)
         self.assertEqual(config["frames_per_client"], 20)
+        self.assertEqual(config["splat_max_screen_size"], 12.0)
+        self.assertEqual(config["splat_exposure"], 1.8)
 
     def test_binary_websocket_upload_lands_in_contract(self) -> None:
         jpeg = (server.SAMPLE / "frames" / "frame_001.jpg").read_bytes()

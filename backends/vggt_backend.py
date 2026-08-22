@@ -77,6 +77,7 @@ class VggtBackend:
             return value.squeeze(0)
 
         points = array("world_points")
+        point_layout = tuple(int(value) for value in points.shape[:3])
         confidences = array("world_points_conf")
         colors = array("images")
         if colors.ndim == 4 and colors.shape[1] == 3:
@@ -106,6 +107,7 @@ class VggtBackend:
             colors=colors.reshape(-1, 3),
             confidences=confidences.reshape(-1),
             cameras=cameras,
+            point_layout=point_layout,
         )
 
     def segment_people(self, images: Sequence[Path]) -> list[Any]:

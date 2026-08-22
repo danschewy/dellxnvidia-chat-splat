@@ -30,6 +30,15 @@ class StaticTests(unittest.TestCase):
         self.assertIn("splatScale", source)
         self.assertIn("splatOpacity", source)
         self.assertIn("runtimeConfig.point_size", source)
+        self.assertIn("vertexColors: false", source)
+        self.assertIn("attribute vec3 splatColor", source)
+        self.assertIn("Math.max(0, (now - flightStart)", source)
+        self.assertIn("Math.atan(principalY / focalY)", source)
+        self.assertIn("function projectedSplatScale()", source)
+        self.assertIn("renderer.domElement.height", source)
+        self.assertIn("runtimeConfig.splat_max_screen_size", source)
+        self.assertIn("runtimeConfig.splat_exposure", source)
+        self.assertRegex(source, r"fragmentShader: `[\s\S]*uniform float exposure;")
 
     def test_status_requires_manual_reconstruction(self) -> None:
         source = (ROOT / "static" / "status.html").read_text()

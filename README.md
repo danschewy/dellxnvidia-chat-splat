@@ -67,7 +67,7 @@ python /tmp/roomscan-get-pip.py
 
 `check_env.py` forces the gsplat CUDA module to load/build, rather than merely importing gsplat's lazy Python wrapper. On CUDA, a failure is printed as a loud M0 failure. Do not proceed to a live demo until the four-frame VGGT forward pass, YOLO load, and compiled gsplat module all report `OK`.
 
-The reference box run was verified on NVIDIA GB10, driver 580.159.03, CUDA toolkit 13.0.88, Python 3.12.3, and PyTorch 2.11.0+cu130. The 25-frame CUDA fixture produced 3,807,300 points and a 100,000-Gaussian splat in 34.03 seconds total.
+The reference box run was verified on NVIDIA GB10, driver 580.159.03, CUDA toolkit 13.0.88, Python 3.12.3, and PyTorch 2.11.0+cu130. The 25-frame CUDA fixture produced 3,807,300 points and a 100,000-Gaussian splat in 34.03 seconds total. A separate 18-photo occupied-room run used the production 300,000-splat budget, removed 882,493 masked person pixels before geometry filtering, retained 1,386,310 room points, and completed in 33.78 seconds. Its recovered-camera flythrough was visually verified in Chrome.
 
 Run the production server with certificate paths supplied by the environment:
 
@@ -75,7 +75,8 @@ Run the production server with certificate paths supplied by the environment:
 export ROOMSCAN_WEIGHTS_DIR=/absolute/path/to/hackathon-models
 export ROOMSCAN_CERT_FILE=/absolute/path/to/fullchain.pem
 export ROOMSCAN_KEY_FILE=/absolute/path/to/privkey.pem
-.venv/bin/python server.py --host 0.0.0.0 --port 8443
+source .venv/bin/activate
+python server.py --host 0.0.0.0 --port 8443
 ```
 
 No runtime downloads are allowed. `models.py` enables Hugging Face/Transformers offline modes and resolves only local paths.
@@ -129,7 +130,7 @@ If PyTorch CUDA, the installed toolkit, and the driver are incompatible, fix tha
 python reconstruct.py /path/to/images /path/to/output
 ```
 
-The longest image edge is resized to 518 before VGGT. At most 32 evenly spaced frames are used by default. A CUDA/MPS OOM halves the frame set and retries down to four frames. `confidence_threshold` is a 0–1 rejected percentile because VGGT confidence is not normalized; `0.5` keeps the higher-confidence half of finite points.
+The longest image edge is resized to 518 before VGGT. At most 32 evenly spaced frames are used by default. A CUDA/MPS OOM halves the frame set and retries down to four frames. `confidence_threshold` is a 0–1 rejected percentile because VGGT confidence is not normalized; `0.5` keeps the higher-confidence half of finite points. When people masking is enabled, the dilated image masks also exclude the corresponding dense 3D points before confidence filtering and splat initialization.
 
 Every stage logs wall-clock seconds and updates `meta.json`. All operational knobs—including masking, frame caps, upload limits, motion heuristic, and splat training—live in `config.json`.
 

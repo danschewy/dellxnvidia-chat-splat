@@ -25,6 +25,8 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
         "frames_per_client",
         "mask_people",
         "gsplat_iterations",
+        "splat_max_screen_size",
+        "splat_exposure",
         "point_size",
         "weights_dir",
         "backend_override",

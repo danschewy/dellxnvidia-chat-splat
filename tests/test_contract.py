@@ -27,7 +27,7 @@ class ContractTests(unittest.TestCase):
         required = {
             "max_frames", "vggt_resolution", "confidence_threshold", "blur_threshold",
             "frames_per_client", "mask_people", "gsplat_iterations", "point_size",
-            "weights_dir", "backend_override",
+            "splat_max_screen_size", "splat_exposure", "weights_dir", "backend_override",
         }
         self.assertFalse(required - self.config.keys())
         self.assertEqual(self.config["vggt_resolution"], 518)
@@ -90,6 +90,31 @@ class ContractTests(unittest.TestCase):
     def test_gsplat_background_shape_matches_packing_mode(self) -> None:
         self.assertEqual(_background_shape(True, camera_count=1), (3,))
         self.assertEqual(_background_shape(False, camera_count=2), (2, 3))
+
+    def test_person_masks_remove_corresponding_dense_geometry(self) -> None:
+        try:
+            import cv2  # noqa: F401
+            import numpy as np
+        except ImportError:
+            self.skipTest("NumPy/OpenCV are only required by the real ML backends")
+
+        result = ReconstructionResult(
+            points=np.arange(24, dtype=np.float32).reshape(8, 3),
+            colors=np.arange(24, dtype=np.uint8).reshape(8, 3),
+            confidences=np.ones(8, dtype=np.float32),
+            cameras=[],
+            point_layout=(2, 2, 2),
+        )
+        masks = [
+            np.array([[False, True], [False, False]]),
+            np.array([[True, False], [False, False]]),
+        ]
+
+        filtered, removed = reconstruct._exclude_masked_points(result, masks)
+
+        self.assertEqual(removed, 2)
+        self.assertEqual(len(filtered.points), 6)
+        self.assertIsNone(filtered.point_layout)
 
     def test_stub_pipeline_writes_full_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

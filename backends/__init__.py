@@ -27,6 +27,7 @@ class ReconstructionResult:
     colors: Any
     confidences: Any
     cameras: list[dict[str, Any]]
+    point_layout: tuple[int, int, int] | None = None
 
 
 class Backend(Protocol):

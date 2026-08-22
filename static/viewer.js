@@ -9,12 +9,18 @@ const mode = document.querySelector('#mode');
 const params = new URLSearchParams(location.search);
 const session = params.get('session');
 const base = session ? `/session/${encodeURIComponent(session)}/` : '/sample_data/';
+let configuredPointSize = Number(sizeInput.value);
+let maxSplatScreenSize = Number.POSITIVE_INFINITY;
+let splatExposure = 1;
 try {
   const runtimeConfig = await fetch('/api/config', { cache: 'no-store' }).then((response) => {
     if (!response.ok) throw new Error('static preview');
     return response.json();
   });
   sizeInput.value = String(runtimeConfig.point_size);
+  configuredPointSize = Number(runtimeConfig.point_size);
+  maxSplatScreenSize = Number(runtimeConfig.splat_max_screen_size);
+  splatExposure = Number(runtimeConfig.splat_exposure);
 } catch {
   // Standalone sample_data previews use the value embedded in viewer.html.
 }
@@ -38,6 +44,18 @@ let flying = true;
 let flightStart = performance.now();
 const segmentMs = 1350;
 const cvToThree = new THREE.Matrix4().makeScale(1, -1, -1);
+
+function projectedSplatScale() {
+  const focalPixels = renderer.domElement.height
+    / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2));
+  return focalPixels * Number(sizeInput.value) / Math.max(configuredPointSize, 0.0001);
+}
+
+function updateSplatPointScale() {
+  if (pointsObject?.material.uniforms?.pointScale) {
+    pointsObject.material.uniforms.pointScale.value = projectedSplatScale();
+  }
+}
 
 function parseAsciiPly(text) {
   const end = text.indexOf('end_header');
@@ -83,34 +101,46 @@ function parseAsciiPly(text) {
 
 function splatMaterial() {
   return new THREE.ShaderMaterial({
-    uniforms: { pointScale: { value: Number(sizeInput.value) * 1400 } },
-    vertexColors: true,
+    uniforms: {
+      pointScale: { value: projectedSplatScale() },
+      maxPointSize: { value: maxSplatScreenSize },
+      exposure: { value: splatExposure },
+    },
+    // Keep the custom splat color attribute distinct from Three's built-in
+    // `color` attribute, which the renderer may inject into shader programs.
+    vertexColors: false,
     transparent: true,
     depthWrite: false,
     vertexShader: `
       attribute float splatScale;
       attribute float splatOpacity;
-      attribute vec3 color;
+      attribute vec3 splatColor;
       varying vec3 vColor;
       varying float vOpacity;
       uniform float pointScale;
+      uniform float maxPointSize;
       void main() {
         vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
         gl_Position = projectionMatrix * viewPosition;
-        gl_PointSize = clamp(pointScale * splatScale / max(-viewPosition.z, 0.01), 1.0, 128.0);
-        vColor = color;
+        gl_PointSize = clamp(
+          pointScale * splatScale / max(-viewPosition.z, 0.01),
+          1.0,
+          maxPointSize
+        );
+        vColor = splatColor;
         vOpacity = splatOpacity;
       }
     `,
     fragmentShader: `
       varying vec3 vColor;
       varying float vOpacity;
+      uniform float exposure;
       void main() {
         vec2 centered = gl_PointCoord - vec2(0.5);
         float radius2 = dot(centered, centered);
         if (radius2 > 0.25) discard;
         float gaussian = exp(-radius2 * 18.0);
-        gl_FragColor = vec4(vColor, gaussian * vOpacity);
+        gl_FragColor = vec4(min(vColor * exposure, vec3(1.0)), gaussian * vOpacity);
       }
     `,
   });
@@ -132,10 +162,12 @@ async function loadCloud() {
   }
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.BufferAttribute(parsed.positions, 3));
-  geometry.setAttribute('color', new THREE.BufferAttribute(parsed.colors, 3));
   if (parsed.isSplat) {
+    geometry.setAttribute('splatColor', new THREE.BufferAttribute(parsed.colors, 3));
     geometry.setAttribute('splatScale', new THREE.BufferAttribute(parsed.splatScales, 1));
     geometry.setAttribute('splatOpacity', new THREE.BufferAttribute(parsed.splatOpacities, 1));
+  } else {
+    geometry.setAttribute('color', new THREE.BufferAttribute(parsed.colors, 3));
   }
   geometry.computeBoundingSphere();
   const material = parsed.isSplat ? splatMaterial() : new THREE.PointsMaterial({
@@ -158,6 +190,15 @@ async function loadFlight() {
   const response = await fetch(`${base}cameras.json`, { cache: 'no-store' });
   if (!response.ok) throw new Error('Camera path is unavailable');
   const cameras = await response.json();
+  const referenceK = cameras[0]?.K;
+  const focalY = Number(referenceK?.[1]?.[1]);
+  const principalY = Number(referenceK?.[1]?.[2]);
+  if (focalY > 0 && principalY > 0) {
+    // K uses image pixels. VGGT centers the principal point, so 2*cy is the
+    // recovered image height and gives the matching vertical field of view.
+    camera.fov = THREE.MathUtils.radToDeg(2 * Math.atan(principalY / focalY));
+    camera.updateProjectionMatrix();
+  }
   flight = cameras.map((entry) => {
     const values = entry.T_wc.flat();
     const matrix = new THREE.Matrix4().set(...values).multiply(cvToThree);
@@ -173,7 +214,9 @@ function smoothstep(value) { return value * value * (3 - 2 * value); }
 
 function updateFlight(now) {
   if (!flying || flight.length < 2) return;
-  const elapsed = (now - flightStart) / segmentMs;
+  // The first rAF timestamp can predate flightStart by a fraction of a frame.
+  // Clamp it so JavaScript's negative remainder cannot produce index -1.
+  const elapsed = Math.max(0, (now - flightStart) / segmentMs);
   const index = Math.floor(elapsed) % flight.length;
   const next = (index + 1) % flight.length;
   const amount = smoothstep(elapsed - Math.floor(elapsed));
@@ -203,7 +246,7 @@ renderer.domElement.addEventListener('pointerdown', () => {
 sizeInput.addEventListener('input', () => {
   if (!pointsObject) return;
   if (pointsObject.material.uniforms?.pointScale) {
-    pointsObject.material.uniforms.pointScale.value = Number(sizeInput.value) * 1400;
+    updateSplatPointScale();
   } else {
     pointsObject.material.size = Number(sizeInput.value);
   }
@@ -212,10 +255,12 @@ addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
+  updateSplatPointScale();
 });
 
 try {
   await Promise.all([loadCloud(), loadFlight()]);
+  updateSplatPointScale();
   controls.enabled = false;
   message.hidden = true;
   flightStart = performance.now();

@@ -166,6 +166,44 @@ def _filter_points(result: ReconstructionResult, threshold: float) -> Reconstruc
     return ReconstructionResult(points[keep], colors[keep], confidences[keep], result.cameras)
 
 
+def _exclude_masked_points(
+    result: ReconstructionResult, masks: Sequence[Any]
+) -> tuple[ReconstructionResult, int]:
+    """Remove pixels identified as people from per-view dense geometry."""
+    if not any(mask is not None for mask in masks):
+        return result, 0
+    if result.point_layout is None:
+        raise ValueError("Reconstruction backend did not report its per-frame point layout")
+    view_count, height, width = result.point_layout
+    if view_count != len(masks):
+        raise ValueError("Person-mask count does not match reconstructed view count")
+
+    import cv2
+    import numpy as np
+
+    flattened_masks = []
+    for mask in masks:
+        if mask is None:
+            resized = np.zeros((height, width), dtype=bool)
+        else:
+            values = np.asarray(mask, dtype=np.uint8)
+            resized = cv2.resize(
+                values, (width, height), interpolation=cv2.INTER_NEAREST
+            ).astype(bool)
+        flattened_masks.append(resized.reshape(-1))
+    person_points = np.concatenate(flattened_masks)
+    if len(person_points) != len(result.points):
+        raise ValueError("Person masks do not align with reconstructed points")
+    keep = ~person_points
+    removed = int(person_points.sum())
+    return ReconstructionResult(
+        points=np.asarray(result.points)[keep],
+        colors=np.asarray(result.colors)[keep],
+        confidences=np.asarray(result.confidences).reshape(-1)[keep],
+        cameras=result.cameras,
+    ), removed
+
+
 def run_pipeline(image_dir: Path, out_dir: Path, config_path: Path | None = None) -> dict[str, Any]:
     config = load_config(config_path)
     backend = select_backend(config, ROOT)
@@ -196,20 +234,29 @@ def run_pipeline(image_dir: Path, out_dir: Path, config_path: Path | None = None
         _persist_meta(out_dir, meta)
 
         with timed_stage(meta, "mask_people"):
+            masks_by_frame: dict[str, Any] = {}
             if bool(config["mask_people"]):
                 masks = backend.segment_people(prepared)
                 prepared = _write_masked_images(prepared, masks, out_dir / "work" / "masked")
+                masks_by_frame = {
+                    image.name: mask for image, mask in zip(prepared, masks)
+                }
             else:
                 meta["stages"]["mask_people"]["detail"] = "disabled in config"
         _persist_meta(out_dir, meta)
 
         with timed_stage(meta, "reconstruct"):
             reconstruction, used_images = _reconstruct_with_backoff(backend, list(prepared))
+            reconstruction, removed_people_points = _exclude_masked_points(
+                reconstruction,
+                [masks_by_frame.get(image.name) for image in used_images],
+            )
             reconstruction = _filter_points(reconstruction, float(config["confidence_threshold"]))
             write_points_ply(out_dir / "points.ply", reconstruction.points, reconstruction.colors)
             atomic_write_json(out_dir / "cameras.json", reconstruction.cameras)
             meta["selected_frame_count"] = len(used_images)
             meta["point_count"] = len(reconstruction.points)
+            meta["masked_point_count"] = removed_people_points
         _persist_meta(out_dir, meta)
 
         # Point and camera artifacts have been fsynced before this optional stage.

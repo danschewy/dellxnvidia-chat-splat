@@ -35,6 +35,7 @@ def reconstruct_pi3(
     with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
         predictions = model(tensor[None])
     points = predictions["points"].detach().float().cpu().numpy().squeeze(0)
+    point_layout = tuple(int(value) for value in points.shape[:3])
     confidences = torch.sigmoid(predictions["conf"]).detach().float().cpu().numpy().squeeze(0)
     poses = predictions["camera_poses"].detach().float().cpu().numpy().squeeze(0)
     colors = (np.stack(arrays) * 255.0).clip(0, 255).astype(np.uint8)
@@ -54,4 +55,5 @@ def reconstruct_pi3(
         colors=colors.reshape(-1, 3),
         confidences=confidences.reshape(-1),
         cameras=cameras,
+        point_layout=point_layout,
     )
