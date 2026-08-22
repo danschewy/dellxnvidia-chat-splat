@@ -43,17 +43,31 @@ Open `https://<mac-lan-ip>:8443/?session=demo`. The first visit uses a developme
 
 ## GB10 / DGX OS setup
 
-The box must have an NVIDIA-supported arm64 PyTorch build whose CUDA runtime matches its driver. Preserve that build—do not install generic PyTorch from PyPI over it.
+The box must have an NVIDIA-supported arm64 PyTorch build whose CUDA runtime matches its driver. Preserve an existing NVIDIA build when present—do not replace it with generic PyPI torch. On a clean CUDA 13 DGX OS install with no system torch, this is the combination validated for ROOMSCAN:
 
 ```bash
 cd roomscan
-python3 -m venv --system-site-packages .venv
+python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements-cuda.txt
-ROOMSCAN_WEIGHTS_DIR=/absolute/path/to/hackathon-models python check_env.py
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install torch==2.11.0 torchvision==0.26.0 \
+  --index-url https://download.pytorch.org/whl/cu130
+CUDA_HOME=/usr/local/cuda PATH="/usr/local/cuda/bin:$PATH" MAX_JOBS=4 \
+  python -m pip install --no-build-isolation -r requirements-cuda.txt
+CUDA_HOME=/usr/local/cuda PATH="/usr/local/cuda/bin:$PATH" \
+  ROOMSCAN_WEIGHTS_DIR=/absolute/path/to/hackathon-models python check_env.py
+```
+
+If DGX OS already supplies a working CUDA torch, create the environment with `--system-site-packages`, omit the torch installation line, and verify its version before installing anything else. If the image's bundled pip 24 repeatedly fails while parsing the package index, bootstrap a current pip, then repeat the packaging command:
+
+```bash
+curl -fsSLo /tmp/roomscan-get-pip.py https://bootstrap.pypa.io/get-pip.py
+python /tmp/roomscan-get-pip.py
 ```
 
 `check_env.py` forces the gsplat CUDA module to load/build, rather than merely importing gsplat's lazy Python wrapper. On CUDA, a failure is printed as a loud M0 failure. Do not proceed to a live demo until the four-frame VGGT forward pass, YOLO load, and compiled gsplat module all report `OK`.
+
+The reference box run was verified on NVIDIA GB10, driver 580.159.03, CUDA toolkit 13.0.88, Python 3.12.3, and PyTorch 2.11.0+cu130. The 25-frame CUDA fixture produced 3,807,300 points and a 100,000-Gaussian splat in 34.03 seconds total.
 
 Run the production server with certificate paths supplied by the environment:
 
@@ -73,10 +87,15 @@ Build the exact directory structure expected by `models.py`:
 ```bash
 export WEIGHTS=/absolute/path/to/hackathon-models
 mkdir -p "$WEIGHTS/meta/VGGT" "$WEIGHTS/meta/Pi3" "$WEIGHTS/yolo"
-hf download facebook/VGGT-1B --local-dir "$WEIGHTS/meta/VGGT"
-hf download yyfz233/Pi3 --local-dir "$WEIGHTS/meta/Pi3"
-python -c "from ultralytics import YOLO; YOLO('yolo11s-seg.pt')"
-mv yolo11s-seg.pt "$WEIGHTS/yolo/yolo11s-seg.pt"
+hf download facebook/VGGT-1B --include config.json --include model.safetensors \
+  --local-dir "$WEIGHTS/meta/VGGT"
+hf download yyfz233/Pi3 --include config.json --include model.safetensors \
+  --local-dir "$WEIGHTS/meta/Pi3"
+curl -fL --retry 3 \
+  -o "$WEIGHTS/yolo/yolo11s-seg.pt" \
+  https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo11s-seg.pt
+hf cache verify facebook/VGGT-1B --local-dir "$WEIGHTS/meta/VGGT"
+hf cache verify yyfz233/Pi3 --local-dir "$WEIGHTS/meta/Pi3"
 ```
 
 Clone and install the VGGT Python package during setup (the requirements files do this); its source code is separate from the weight bundle. Copy the completed virtual environment/source installation and weights to the offline box, or repeat installation while the box is still connected. Then disconnect networking and run:

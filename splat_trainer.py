@@ -14,6 +14,13 @@ def _logit(value: float) -> float:
     return math.log(value / (1.0 - value))
 
 
+def _background_shape(
+    packed: bool, camera_count: int, channels: int = 3
+) -> tuple[int, ...]:
+    """Return the background shape required by gsplat's packed/unpacked APIs."""
+    return (channels,) if packed else (camera_count, channels)
+
+
 def train_splat_bytes(
     config: dict[str, Any],
     poses: list[dict[str, Any]],
@@ -72,14 +79,22 @@ def train_splat_bytes(
             target_batch, size=(height, width), mode="bilinear", align_corners=False
         )
     targets = target_batch.permute(0, 2, 3, 1).contiguous()
-    viewmats = torch.tensor(
-        [np.linalg.inv(np.asarray(camera["T_wc"], dtype=np.float32)) for camera in poses],
-        device=device,
+    viewmats = torch.from_numpy(
+        np.stack(
+            [
+                np.linalg.inv(np.asarray(camera["T_wc"], dtype=np.float32))
+                for camera in poses
+            ]
+        )
+    ).to(device)
+    intrinsics = torch.from_numpy(
+        np.asarray([camera["K"] for camera in poses], dtype=np.float32)
     )
-    intrinsics = torch.tensor([camera["K"] for camera in poses], dtype=torch.float32, device=device)
+    intrinsics = intrinsics.to(device)
     intrinsics[:, 0, :] *= width / source_width
     intrinsics[:, 1, :] *= height / source_height
     iterations = int(config["gsplat_iterations"])
+    packed = True
 
     for step in range(iterations):
         camera_index = step % min(len(poses), len(targets))
@@ -93,9 +108,9 @@ def train_splat_bytes(
             Ks=intrinsics[camera_index : camera_index + 1],
             width=width,
             height=height,
-            packed=True,
+            packed=packed,
             sh_degree=None,
-            backgrounds=torch.zeros((1, 3), device=device),
+            backgrounds=torch.zeros(_background_shape(packed, 1), device=device),
         )
         visible = alpha[0].detach().clamp_min(0.05)
         loss = ((rendered[0] - targets[camera_index]).abs() * visible).mean()

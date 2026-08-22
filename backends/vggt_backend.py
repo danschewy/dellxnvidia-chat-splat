@@ -10,6 +10,19 @@ from models import load_vggt, load_yolo
 from roomscan_io import resolve_weights_dir
 
 
+def _invert_batched_se3(extrinsic: Any, inverse_fn: Any) -> Any:
+    """Adapt VGGT's BxS pose batch to its Nx3x4 inverse helper."""
+    if len(extrinsic.shape) < 3 or tuple(extrinsic.shape[-2:]) not in {
+        (3, 4),
+        (4, 4),
+    }:
+        raise ValueError(f"Expected batched 3x4 or 4x4 extrinsics, got {tuple(extrinsic.shape)}")
+    leading_shape = tuple(extrinsic.shape[:-2])
+    flattened = extrinsic.reshape((-1,) + tuple(extrinsic.shape[-2:]))
+    inverted = inverse_fn(flattened)
+    return inverted.reshape(leading_shape + (4, 4))
+
+
 class VggtBackend:
     name = "vggt"
 
@@ -69,9 +82,15 @@ class VggtBackend:
         if colors.ndim == 4 and colors.shape[1] == 3:
             colors = colors.transpose(0, 2, 3, 1)
         colors = np.clip(colors * 255.0, 0, 255).astype(np.uint8)
-        extrinsic_np = extrinsic.detach().float().cpu().numpy().squeeze(0)
         intrinsic_np = intrinsic.detach().float().cpu().numpy().squeeze(0)
-        camera_to_world = closed_form_inverse_se3(extrinsic).detach().float().cpu().numpy().squeeze(0)
+        camera_to_world = (
+            _invert_batched_se3(extrinsic, closed_form_inverse_se3)
+            .detach()
+            .float()
+            .cpu()
+            .numpy()
+            .squeeze(0)
+        )
         cameras = []
         for index, image in enumerate(images):
             cameras.append(

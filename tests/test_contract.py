@@ -10,8 +10,10 @@ from unittest import mock
 
 from backends import ReconstructionResult, select_backend
 from backends.stub import StubBackend
+from backends.vggt_backend import _invert_batched_se3
 import reconstruct
 from roomscan_io import evenly_subsample, load_config, read_points_ply
+from splat_trainer import _background_shape
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,6 +60,36 @@ class ContractTests(unittest.TestCase):
 
     def test_even_subsample_keeps_endpoints(self) -> None:
         self.assertEqual(evenly_subsample(list(range(10)), 4), [0, 3, 6, 9])
+
+    def test_vggt_pose_inverse_flattens_and_restores_batch_axes(self) -> None:
+        class ShapeOnlyTensor:
+            def __init__(self, shape):
+                self.shape = tuple(shape)
+
+            def reshape(self, shape):
+                shape = tuple(shape)
+                if shape[0] == -1:
+                    flattened = 1
+                    for size in self.shape[:-2]:
+                        flattened *= size
+                    shape = (flattened,) + shape[1:]
+                return ShapeOnlyTensor(shape)
+
+        extrinsic = ShapeOnlyTensor((1, 2, 3, 4))
+        received_shapes = []
+
+        def inverse(flattened):
+            received_shapes.append(flattened.shape)
+            return ShapeOnlyTensor((flattened.shape[0], 4, 4))
+
+        inverted = _invert_batched_se3(extrinsic, inverse)
+
+        self.assertEqual(received_shapes, [(2, 3, 4)])
+        self.assertEqual(inverted.shape, (1, 2, 4, 4))
+
+    def test_gsplat_background_shape_matches_packing_mode(self) -> None:
+        self.assertEqual(_background_shape(True, camera_count=1), (3,))
+        self.assertEqual(_background_shape(False, camera_count=2), (2, 3))
 
     def test_stub_pipeline_writes_full_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
