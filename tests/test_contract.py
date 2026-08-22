@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import os
 from pathlib import Path
@@ -29,11 +30,18 @@ class ContractTests(unittest.TestCase):
         self.assertFalse(required - self.config.keys())
         self.assertEqual(self.config["vggt_resolution"], 518)
         self.assertEqual(self.config["max_frames"], 32)
+        self.assertIn(self.config["geometry_model"], {"vggt", "pi3"})
 
     def test_explicit_stub_selection_requires_no_ml_dependencies(self) -> None:
         with mock.patch.dict(os.environ, {"ROOMSCAN_BACKEND": "stub"}):
             backend = select_backend(self.config, ROOT)
         self.assertIsInstance(backend, StubBackend)
+
+    def test_backend_segmentation_contract_returns_masks_from_images_only(self) -> None:
+        parameters = list(inspect.signature(StubBackend.segment_people).parameters)
+        self.assertEqual(parameters, ["self", "images"])
+        backend = StubBackend(self.config, ROOT)
+        self.assertEqual(backend.segment_people([Path("a.jpg"), Path("b.jpg")]), [None, None])
 
     def test_fixture_contract_is_complete(self) -> None:
         frames = sorted((ROOT / "sample_data" / "frames").glob("*.jpg"))

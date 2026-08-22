@@ -51,7 +51,7 @@ def _copy_inputs(images: Sequence[Path], frames_dir: Path) -> list[Path]:
         return list(images)
     copied = []
     for index, source in enumerate(images):
-        target = frames_dir / f"{index:03d}_{source.name}"
+        target = frames_dir / f"{index:03d}_{source.stem}.jpg"
         if source.resolve() != target.resolve():
             shutil.copy2(source, target)
         copied.append(target)
@@ -71,6 +71,43 @@ def _resize_for_vggt(images: Sequence[Path], out_dir: Path, resolution: int) -> 
             image = image.convert("RGB")
             image.thumbnail((resolution, resolution), Image.Resampling.LANCZOS)
             image.save(target, format="JPEG", quality=90, optimize=True)
+        outputs.append(target)
+    return outputs
+
+
+def _write_masked_images(images: Sequence[Path], masks: Sequence[Any], out_dir: Path) -> list[Path]:
+    if len(images) != len(masks):
+        raise ValueError("segmentation backend returned the wrong number of masks")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if all(mask is None for mask in masks):
+        outputs = []
+        for image in images:
+            target = out_dir / image.name
+            shutil.copy2(image, target)
+            outputs.append(target)
+        return outputs
+    try:
+        import cv2
+        import numpy as np
+    except ImportError as exc:
+        raise RuntimeError("OpenCV and NumPy are required to persist segmentation masks") from exc
+    masks_dir = out_dir.parent / "masks"
+    masks_dir.mkdir(parents=True, exist_ok=True)
+    outputs = []
+    for image_path, mask in zip(images, masks):
+        image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+        if image is None:
+            raise ValueError(f"Could not read image for masking: {image_path}")
+        boolean_mask = np.zeros(image.shape[:2], dtype=bool) if mask is None else np.asarray(mask, dtype=bool)
+        if boolean_mask.shape != image.shape[:2]:
+            raise ValueError(f"Mask shape does not match frame: {image_path}")
+        image[boolean_mask] = 0
+        mask_path = masks_dir / f"{image_path.stem}.png"
+        target = out_dir / image_path.name
+        if not cv2.imwrite(str(mask_path), boolean_mask.astype(np.uint8) * 255):
+            raise OSError(f"Could not write person mask: {mask_path}")
+        if not cv2.imwrite(str(target), image, [cv2.IMWRITE_JPEG_QUALITY, 90]):
+            raise OSError(f"Could not write masked frame: {target}")
         outputs.append(target)
     return outputs
 
@@ -160,7 +197,8 @@ def run_pipeline(image_dir: Path, out_dir: Path, config_path: Path | None = None
 
         with timed_stage(meta, "mask_people"):
             if bool(config["mask_people"]):
-                prepared = backend.segment_people(prepared, out_dir / "work" / "masked")
+                masks = backend.segment_people(prepared)
+                prepared = _write_masked_images(prepared, masks, out_dir / "work" / "masked")
             else:
                 meta["stages"]["mask_people"]["detail"] = "disabled in config"
         _persist_meta(out_dir, meta)

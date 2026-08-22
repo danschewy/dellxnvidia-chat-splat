@@ -14,20 +14,6 @@ def _logit(value: float) -> float:
     return math.log(value / (1.0 - value))
 
 
-def _target_image(path: Path, size: int, device: str) -> Any:
-    import numpy as np
-    from PIL import Image
-    import torch
-
-    with Image.open(path) as source:
-        image = source.convert("RGB")
-        image.thumbnail((size, size), Image.Resampling.LANCZOS)
-        canvas = Image.new("RGB", (size, size))
-        canvas.paste(image, ((size - image.width) // 2, (size - image.height) // 2))
-        array = np.asarray(canvas, dtype=np.float32) / 255.0
-    return torch.from_numpy(array).to(device)
-
-
 def train_splat_bytes(
     config: dict[str, Any],
     poses: list[dict[str, Any]],
@@ -37,6 +23,7 @@ def train_splat_bytes(
     import numpy as np
     import torch
     from gsplat import rasterization
+    from vggt.utils.load_fn import load_and_preprocess_images
 
     if not poses or not images:
         raise ValueError("Splat training requires at least one posed image")
@@ -71,14 +58,27 @@ def train_splat_bytes(
             {"params": [opacity_logits], "lr": rate * 0.5},
         ]
     )
-    size = int(config["splat_train_resolution"])
-    targets = [_target_image(path, size, device) for path in images]
+    # Reuse VGGT's exact crop/resize transform so K and target pixels remain
+    # aligned. Padding phone images to a square would require principal-point
+    # offsets and roughly doubles attention/render work for 16:9 captures.
+    target_batch = load_and_preprocess_images([str(path) for path in images]).to(device)
+    source_height, source_width = target_batch.shape[-2:]
+    requested_size = int(config["splat_train_resolution"])
+    resize_scale = min(1.0, requested_size / max(source_height, source_width))
+    height = max(1, round(source_height * resize_scale))
+    width = max(1, round(source_width * resize_scale))
+    if (height, width) != (source_height, source_width):
+        target_batch = torch.nn.functional.interpolate(
+            target_batch, size=(height, width), mode="bilinear", align_corners=False
+        )
+    targets = target_batch.permute(0, 2, 3, 1).contiguous()
     viewmats = torch.tensor(
         [np.linalg.inv(np.asarray(camera["T_wc"], dtype=np.float32)) for camera in poses],
         device=device,
     )
     intrinsics = torch.tensor([camera["K"] for camera in poses], dtype=torch.float32, device=device)
-    intrinsics[:, :2, :] *= size / float(config["vggt_resolution"])
+    intrinsics[:, 0, :] *= width / source_width
+    intrinsics[:, 1, :] *= height / source_height
     iterations = int(config["gsplat_iterations"])
 
     for step in range(iterations):
@@ -91,8 +91,8 @@ def train_splat_bytes(
             colors=torch.sigmoid(color_logits),
             viewmats=viewmats[camera_index : camera_index + 1],
             Ks=intrinsics[camera_index : camera_index + 1],
-            width=size,
-            height=size,
+            width=width,
+            height=height,
             packed=True,
             sh_degree=None,
             backgrounds=torch.zeros((1, 3), device=device),

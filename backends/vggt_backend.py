@@ -89,11 +89,10 @@ class VggtBackend:
             cameras=cameras,
         )
 
-    def segment_people(self, images: Sequence[Path], out_dir: Path) -> list[Path]:
+    def segment_people(self, images: Sequence[Path]) -> list[Any]:
         import cv2
         import numpy as np
 
-        out_dir.mkdir(parents=True, exist_ok=True)
         results = self.yolo.predict(
             source=[str(path) for path in images],
             classes=[0],
@@ -101,7 +100,7 @@ class VggtBackend:
             verbose=False,
             stream=False,
         )
-        outputs: list[Path] = []
+        outputs: list[Any] = []
         kernel = np.ones((21, 21), np.uint8)
         for image_path, result in zip(images, results):
             image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
@@ -114,9 +113,5 @@ class VggtBackend:
                     mask = cv2.resize(raw, (image.shape[1], image.shape[0]))
                     union |= (mask > 0.5).astype(np.uint8)
             union = cv2.dilate(union, kernel, iterations=1)
-            image[union.astype(bool)] = 0
-            target = out_dir / image_path.name
-            if not cv2.imwrite(str(target), image, [cv2.IMWRITE_JPEG_QUALITY, 90]):
-                raise OSError(f"Could not write masked frame: {target}")
-            outputs.append(target)
+            outputs.append(union.astype(bool))
         return outputs

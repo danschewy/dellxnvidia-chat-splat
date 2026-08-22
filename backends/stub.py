@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-import shutil
 from typing import Any, Sequence
 
 from . import ReconstructionResult
@@ -48,11 +47,7 @@ class StubBackend:
     ) -> bytes | None:
         return None
 
-    def segment_people(self, images: Sequence[Path], out_dir: Path) -> list[Path]:
-        out_dir.mkdir(parents=True, exist_ok=True)
-        outputs = []
-        for image in images:
-            target = out_dir / image.name
-            shutil.copy2(image, target)
-            outputs.append(target)
-        return outputs
+    def segment_people(self, images: Sequence[Path]) -> list[Any]:
+        # None is the backend-neutral empty mask and avoids any NumPy/Pillow
+        # dependency on the guaranteed fallback path.
+        return [None for _ in images]

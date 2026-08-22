@@ -41,7 +41,7 @@ class Backend(Protocol):
         images: Sequence[Path],
     ) -> bytes | None: ...
 
-    def segment_people(self, images: Sequence[Path], out_dir: Path) -> list[Path]: ...
+    def segment_people(self, images: Sequence[Path]) -> list[Any]: ...
 
 
 def _torch_capabilities() -> tuple[bool, bool]:
@@ -67,34 +67,27 @@ def select_backend(config: dict[str, Any], root: Path | None = None) -> Backend:
 
     if requested not in {"auto", "stub", "cuda", "mps"}:
         raise ValueError("ROOMSCAN_BACKEND/backend_override must be auto, stub, cuda, or mps")
-    if requested == "stub":
+
+    selected = requested
+    if selected == "auto":
+        selected = "cuda" if cuda else "mps" if mps else "stub"
+    if selected == "cuda" and not cuda:
+        raise RuntimeError("CUDA backend was requested but torch.cuda.is_available() is false")
+    if selected == "mps" and not mps:
+        raise RuntimeError("MPS backend was requested but torch.backends.mps is unavailable")
+
+    if selected == "stub":
         from .stub import StubBackend
 
         backend: Backend = StubBackend(config, project_root)
-    elif requested == "cuda":
-        if not cuda:
-            raise RuntimeError("CUDA backend was requested but torch.cuda.is_available() is false")
+    elif selected == "cuda":
         from .cuda import CudaBackend
 
         backend = CudaBackend(config, project_root)
-    elif requested == "mps":
-        if not mps:
-            raise RuntimeError("MPS backend was requested but torch.backends.mps is unavailable")
-        from .mps import MpsBackend
-
-        backend = MpsBackend(config, project_root)
-    elif cuda:
-        from .cuda import CudaBackend
-
-        backend = CudaBackend(config, project_root)
-    elif mps:
-        from .mps import MpsBackend
-
-        backend = MpsBackend(config, project_root)
     else:
-        from .stub import StubBackend
+        from .mps import MpsBackend
 
-        backend = StubBackend(config, project_root)
+        backend = MpsBackend(config, project_root)
 
     banner = f"ROOMSCAN BACKEND: {backend.name.upper()}"
     print(f"\n{'=' * len(banner)}\n{banner}\n{'=' * len(banner)}\n", flush=True)

@@ -4,12 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import platform
 import time
 
 from backends import select_backend
-from models import import_gsplat_checked, load_vggt, load_yolo, vggt_path, yolo_path
+from models import import_gsplat_checked, load_vggt, load_yolo, pi3_path, vggt_path, yolo_path
 from roomscan_io import load_config, resolve_weights_dir
 
 
@@ -23,7 +24,7 @@ def status(label: str, state: str, detail: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path)
-    parser.add_argument("--smoke-models", action="store_true", help="load models and run a four-image VGGT forward pass")
+    parser.add_argument("--skip-model-smoke", action="store_true", help="diagnostics only: skip real-backend model loads")
     arguments = parser.parse_args()
     config = load_config(arguments.config)
     weights = resolve_weights_dir(config, ROOT)
@@ -44,7 +45,8 @@ def main() -> int:
             properties = torch.cuda.get_device_properties(0)
             status("accelerator", "OK", f"{properties.name}, {properties.total_memory / 2**30:.1f} GiB")
         elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-            status("accelerator", "OK", "Apple MPS (unified memory; capacity not exposed by torch)")
+            total_memory = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2**30
+            status("accelerator", "OK", f"Apple MPS, {total_memory:.1f} GiB unified system memory")
         else:
             status("accelerator", "NONE", "CPU only; stub backend is expected")
 
@@ -56,6 +58,10 @@ def main() -> int:
         status("YOLO weights", "OK", str(yolo_path(weights)))
     except Exception as exc:
         status("YOLO weights", "MISSING", str(exc))
+    try:
+        status("Pi3 fallback", "OK", str(pi3_path(weights)))
+    except Exception as exc:
+        status("Pi3 fallback", "OPTIONAL", str(exc))
 
     try:
         import_gsplat_checked()
@@ -67,7 +73,7 @@ def main() -> int:
     else:
         status("gsplat extension", "OK", "imported rasterization entry point")
 
-    if arguments.smoke_models and backend.name in {"cuda", "mps"}:
+    if not arguments.skip_model_smoke and backend.name in {"cuda", "mps"}:
         assert torch is not None
         started = time.perf_counter()
         try:
@@ -94,7 +100,8 @@ def main() -> int:
         else:
             status("YOLO load", "OK", "local yolo11s-seg loaded")
     else:
-        status("model smoke tests", "SKIPPED", "pass --smoke-models on CUDA/MPS")
+        reason = "explicitly skipped" if arguments.skip_model_smoke else "selected backend loads no models"
+        status("model smoke tests", "SKIPPED", reason)
     print("=" * 70)
     return 0
 

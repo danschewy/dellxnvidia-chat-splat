@@ -13,6 +13,11 @@ class MpsBackend(VggtBackend):
     def __init__(self, config: dict[str, Any], root: Path):
         super().__init__(config, root, "mps")
 
+    def reconstruct(self, images: Sequence[Path]) -> ReconstructionResult:
+        if str(self.config.get("geometry_model", "vggt")).lower() != "vggt":
+            raise RuntimeError("Pi3 fallback is supported only by CudaBackend")
+        return super().reconstruct(images)
+
     def train_splat(
         self,
         poses: list[dict[str, Any]],

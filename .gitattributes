@@ -1,0 +1,3 @@
+# Vendored, pinned upstream distributions are not reformatted locally.
+static/vendor/*.js -whitespace
+sample_data/frames/*.jpg binary

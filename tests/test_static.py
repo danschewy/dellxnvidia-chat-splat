@@ -27,6 +27,9 @@ class StaticTests(unittest.TestCase):
         self.assertIn("points.ply", source)
         self.assertIn("cameras.json", source)
         self.assertIn("lerpVectors", source)
+        self.assertIn("splatScale", source)
+        self.assertIn("splatOpacity", source)
+        self.assertIn("runtimeConfig.point_size", source)
 
     def test_status_requires_manual_reconstruction(self) -> None:
         source = (ROOT / "static" / "status.html").read_text()

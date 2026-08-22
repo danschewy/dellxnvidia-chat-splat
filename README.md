@@ -50,7 +50,7 @@ cd roomscan
 python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
 pip install -r requirements-cuda.txt
-ROOMSCAN_WEIGHTS_DIR=/absolute/path/to/hackathon-models python check_env.py --smoke-models
+ROOMSCAN_WEIGHTS_DIR=/absolute/path/to/hackathon-models python check_env.py
 ```
 
 `check_env.py` forces the gsplat CUDA module to load/build, rather than merely importing gsplat's lazy Python wrapper. On CUDA, a failure is printed as a loud M0 failure. Do not proceed to a live demo until the four-frame VGGT forward pass, YOLO load, and compiled gsplat module all report `OK`.
@@ -72,8 +72,9 @@ Build the exact directory structure expected by `models.py`:
 
 ```bash
 export WEIGHTS=/absolute/path/to/hackathon-models
-mkdir -p "$WEIGHTS/meta/VGGT" "$WEIGHTS/yolo"
+mkdir -p "$WEIGHTS/meta/VGGT" "$WEIGHTS/meta/Pi3" "$WEIGHTS/yolo"
 hf download facebook/VGGT-1B --local-dir "$WEIGHTS/meta/VGGT"
+hf download yyfz233/Pi3 --local-dir "$WEIGHTS/meta/Pi3"
 python -c "from ultralytics import YOLO; YOLO('yolo11s-seg.pt')"
 mv yolo11s-seg.pt "$WEIGHTS/yolo/yolo11s-seg.pt"
 ```
@@ -81,10 +82,12 @@ mv yolo11s-seg.pt "$WEIGHTS/yolo/yolo11s-seg.pt"
 Clone and install the VGGT Python package during setup (the requirements files do this); its source code is separate from the weight bundle. Copy the completed virtual environment/source installation and weights to the offline box, or repeat installation while the box is still connected. Then disconnect networking and run:
 
 ```bash
-HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 ROOMSCAN_WEIGHTS_DIR="$WEIGHTS" python check_env.py --smoke-models
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 ROOMSCAN_WEIGHTS_DIR="$WEIGHTS" python check_env.py
 ```
 
 A missing model error always names the exact expected local path.
+
+VGGT is the default geometry model. Set `geometry_model` to `pi3` in `config.json` to force the permutation-equivariant fallback when input ordering is suspect. On CUDA, a non-OOM VGGT runtime failure also activates Pi3 automatically when its local weights are present; OOM still follows the frame-subsampling path first.
 
 ## When gsplat will not build
 
@@ -96,7 +99,7 @@ python -c "import torch; print(torch.__version__, torch.version.cuda); print(tor
 nvcc --version
 MAX_JOBS=4 pip install --no-build-isolation --force-reinstall 'gsplat>=1.5,<2'
 python -c "from gsplat.cuda._backend import _C; assert _C is not None; print(_C)"
-python check_env.py --smoke-models
+python check_env.py
 ```
 
 If PyTorch CUDA, the installed toolkit, and the driver are incompatible, fix that environment rather than hiding the error. If gsplat still fails near demo time, set `ROOMSCAN_BACKEND=stub` for the guaranteed fixture demo, or leave CUDA selected and use `points.ply`: splat failure is non-fatal and the viewer automatically falls back to the point cloud. Never try to install gsplat on the Mac.

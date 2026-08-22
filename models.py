@@ -32,7 +32,10 @@ def vggt_path(weights_dir: Path) -> Path:
     for candidate in candidates:
         if candidate.is_dir() and any((candidate / name).is_file() for name in ("model.pt", "model.safetensors")):
             return candidate
-    return _require(candidates[0], "VGGT weights (facebook/VGGT-1B)")
+    raise MissingWeightError(
+        "Missing VGGT weights (facebook/VGGT-1B). Expected local file: "
+        f"{candidates[0] / 'model.safetensors'} (or {candidates[0] / 'model.pt'})"
+    )
 
 
 def yolo_path(weights_dir: Path) -> Path:
@@ -45,6 +48,16 @@ def yolo_path(weights_dir: Path) -> Path:
         if candidate.is_file():
             return candidate
     return _require(candidates[0], "YOLO people-segmentation weights (yolo11s-seg.pt)")
+
+
+def pi3_path(weights_dir: Path) -> Path:
+    candidates = [weights_dir / "meta" / "Pi3", weights_dir / "yyfz233" / "Pi3"]
+    for candidate in candidates:
+        if candidate.is_dir() and (candidate / "model.safetensors").is_file():
+            return candidate
+    raise MissingWeightError(
+        f"Missing Pi3 fallback weights (yyfz233/Pi3). Expected local file: {candidates[0] / 'model.safetensors'}"
+    )
 
 
 def load_vggt(weights_dir: Path, device: str) -> Any:
@@ -71,6 +84,19 @@ def load_yolo(weights_dir: Path) -> Any:
     except ImportError as exc:
         raise RuntimeError("ultralytics is not installed; cannot load yolo11s-seg") from exc
     return YOLO(str(weight_file))
+
+
+def load_pi3(weights_dir: Path, device: str) -> Any:
+    local_dir = pi3_path(weights_dir)
+    try:
+        from pi3.models.pi3 import Pi3
+    except ImportError as exc:
+        raise RuntimeError("Pi3 Python package is not installed; install requirements-cuda.txt") from exc
+    try:
+        model = Pi3.from_pretrained(str(local_dir), local_files_only=LOCAL_FILES_ONLY)
+    except TypeError:
+        model = Pi3.from_pretrained(str(local_dir))
+    return model.eval().to(device)
 
 
 def import_gsplat_checked() -> Any:

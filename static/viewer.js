@@ -9,6 +9,15 @@ const mode = document.querySelector('#mode');
 const params = new URLSearchParams(location.search);
 const session = params.get('session');
 const base = session ? `/session/${encodeURIComponent(session)}/` : '/sample_data/';
+try {
+  const runtimeConfig = await fetch('/api/config', { cache: 'no-store' }).then((response) => {
+    if (!response.ok) throw new Error('static preview');
+    return response.json();
+  });
+  sizeInput.value = String(runtimeConfig.point_size);
+} catch {
+  // Standalone sample_data previews use the value embedded in viewer.html.
+}
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x07090d);
@@ -48,6 +57,8 @@ function parseAsciiPly(text) {
   const positions = new Float32Array(count * 3);
   const colors = new Float32Array(count * 3);
   const isSplat = propertyIndex.f_dc_0 !== undefined;
+  const splatScales = isSplat ? new Float32Array(count) : null;
+  const splatOpacities = isSplat ? new Float32Array(count) : null;
   for (let index = 0; index < count; index += 1) {
     const values = rows[index].trim().split(/\s+/).map(Number);
     positions.set([values[propertyIndex.x], values[propertyIndex.y], values[propertyIndex.z]], index * 3);
@@ -57,6 +68,8 @@ function parseAsciiPly(text) {
         THREE.MathUtils.clamp(0.5 + 0.2820947918 * values[propertyIndex.f_dc_1], 0, 1),
         THREE.MathUtils.clamp(0.5 + 0.2820947918 * values[propertyIndex.f_dc_2], 0, 1),
       ], index * 3);
+      splatScales[index] = Math.exp((values[propertyIndex.scale_0] + values[propertyIndex.scale_1] + values[propertyIndex.scale_2]) / 3);
+      splatOpacities[index] = 1 / (1 + Math.exp(-values[propertyIndex.opacity]));
     } else {
       colors.set([
         values[propertyIndex.red] / 255,
@@ -65,7 +78,42 @@ function parseAsciiPly(text) {
       ], index * 3);
     }
   }
-  return { positions, colors, isSplat };
+  return { positions, colors, isSplat, splatScales, splatOpacities };
+}
+
+function splatMaterial() {
+  return new THREE.ShaderMaterial({
+    uniforms: { pointScale: { value: Number(sizeInput.value) * 1400 } },
+    vertexColors: true,
+    transparent: true,
+    depthWrite: false,
+    vertexShader: `
+      attribute float splatScale;
+      attribute float splatOpacity;
+      attribute vec3 color;
+      varying vec3 vColor;
+      varying float vOpacity;
+      uniform float pointScale;
+      void main() {
+        vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
+        gl_Position = projectionMatrix * viewPosition;
+        gl_PointSize = clamp(pointScale * splatScale / max(-viewPosition.z, 0.01), 1.0, 128.0);
+        vColor = color;
+        vOpacity = splatOpacity;
+      }
+    `,
+    fragmentShader: `
+      varying vec3 vColor;
+      varying float vOpacity;
+      void main() {
+        vec2 centered = gl_PointCoord - vec2(0.5);
+        float radius2 = dot(centered, centered);
+        if (radius2 > 0.25) discard;
+        float gaussian = exp(-radius2 * 18.0);
+        gl_FragColor = vec4(vColor, gaussian * vOpacity);
+      }
+    `,
+  });
 }
 
 async function loadCloud() {
@@ -85,8 +133,12 @@ async function loadCloud() {
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.BufferAttribute(parsed.positions, 3));
   geometry.setAttribute('color', new THREE.BufferAttribute(parsed.colors, 3));
+  if (parsed.isSplat) {
+    geometry.setAttribute('splatScale', new THREE.BufferAttribute(parsed.splatScales, 1));
+    geometry.setAttribute('splatOpacity', new THREE.BufferAttribute(parsed.splatOpacities, 1));
+  }
   geometry.computeBoundingSphere();
-  const material = new THREE.PointsMaterial({
+  const material = parsed.isSplat ? splatMaterial() : new THREE.PointsMaterial({
     size: Number(sizeInput.value),
     vertexColors: true,
     sizeAttenuation: true,
@@ -99,7 +151,6 @@ async function loadCloud() {
   controls.target.copy(sphere.center);
   camera.position.set(sphere.center.x, sphere.center.y + sphere.radius * 0.35, sphere.center.z + sphere.radius * 1.15);
   controls.update();
-  sizeInput.value = String(Math.max(0.002, Math.min(0.08, sphere.radius * 0.0035)));
   material.size = Number(sizeInput.value);
 }
 
@@ -150,7 +201,12 @@ renderer.domElement.addEventListener('pointerdown', () => {
   if (flying) flyButton.click();
 }, { passive: true });
 sizeInput.addEventListener('input', () => {
-  if (pointsObject) pointsObject.material.size = Number(sizeInput.value);
+  if (!pointsObject) return;
+  if (pointsObject.material.uniforms?.pointScale) {
+    pointsObject.material.uniforms.pointScale.value = Number(sizeInput.value) * 1400;
+  } else {
+    pointsObject.material.size = Number(sizeInput.value);
+  }
 });
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
