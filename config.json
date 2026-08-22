@@ -1,0 +1,22 @@
+{
+  "max_frames": 32,
+  "vggt_resolution": 518,
+  "confidence_threshold": 0.5,
+  "blur_threshold": 80.0,
+  "frames_per_client": 20,
+  "capture_seconds": 15,
+  "capture_fps": 2,
+  "jpeg_quality": 0.7,
+  "capture_width": 720,
+  "motion_rotation_threshold": 35.0,
+  "motion_translation_threshold": 0.35,
+  "max_upload_bytes": 1500000,
+  "mask_people": true,
+  "gsplat_iterations": 3000,
+  "max_splat_points": 100000,
+  "splat_train_resolution": 518,
+  "splat_learning_rate": 0.002,
+  "point_size": 0.018,
+  "weights_dir": "../hackathon-models",
+  "backend_override": "auto"
+}

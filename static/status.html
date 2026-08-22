@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#080b10">
+  <title>ROOMSCAN — Session status</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    body { max-width: 880px; margin: 0 auto; padding: 42px 22px; background: #080b10; color: #e8edf4; }
+    header { display: flex; justify-content: space-between; align-items: end; margin-bottom: 30px; }
+    h1 { margin: 0; letter-spacing: .16em; font-size: 22px; } .muted { color: #8f9aaa; }
+    .row { display: flex; gap: 10px; } input, button, a { border: 1px solid #ffffff1e; border-radius: 10px; padding: 11px 14px; font: inherit; }
+    input { min-width: 0; background: #111722; color: #fff; } button, a { background: #72efb7; color: #06100c; font-weight: 800; cursor: pointer; text-decoration: none; }
+    button:disabled { background: #28302f; color: #87918e; cursor: wait; }
+    .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 22px 0; }
+    .card, table { width: 100%; border: 1px solid #ffffff18; background: #0e131c; border-radius: 14px; }
+    .card { padding: 18px; } .value { display: block; font-size: 30px; font-weight: 900; margin-top: 5px; }
+    table { border-collapse: separate; border-spacing: 0; overflow: hidden; } th, td { padding: 13px 15px; text-align: left; border-bottom: 1px solid #ffffff10; } tr:last-child td { border: 0; }
+    .dot { display: inline-block; width: 8px; height: 8px; margin-right: 7px; border-radius: 50%; background: #596170; }.dot.on { background: #72efb7; box-shadow: 0 0 10px #72efb7; }
+    #job { margin: 18px 0; padding: 14px; color: #aab5c4; background: #111722; border-radius: 10px; white-space: pre-wrap; }
+    @media (max-width: 580px) { header { display: block; } .row { margin-top: 18px; } .stats { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header><div><h1>ROOMSCAN</h1><div class="muted">Crowd capture console</div></div><div class="row"><input id="session" value="demo" aria-label="Session ID"><button id="load">Load</button></div></header>
+  <div class="stats"><div class="card">Connected<span class="value" id="connected">0</span></div><div class="card">Total frames<span class="value" id="frames">0</span></div><div class="card">Backend<span class="value" id="backend">—</span></div></div>
+  <table><thead><tr><th>Client</th><th>Frames</th><th>State</th></tr></thead><tbody id="clients"><tr><td colspan="3" class="muted">No clients yet</td></tr></tbody></table>
+  <div id="job">Idle — reconstruction only starts when you press the button.</div>
+  <div class="row"><button id="reconstruct">Reconstruct</button><a id="viewer" href="/viewer?session=demo">Open viewer</a></div>
+  <script>
+    const input = document.querySelector('#session');
+    input.value = new URLSearchParams(location.search).get('session') || 'demo';
+    let sessionId = input.value;
+    async function refresh() {
+      const response = await fetch(`/api/session/${encodeURIComponent(sessionId)}/status`, {cache:'no-store'});
+      if (!response.ok) return;
+      const data = await response.json();
+      document.querySelector('#connected').textContent = data.connected_clients;
+      document.querySelector('#frames').textContent = data.frame_count;
+      document.querySelector('#backend').textContent = data.backend.toUpperCase();
+      document.querySelector('#clients').innerHTML = data.clients.length ? data.clients.map(client => `<tr><td>${client.client_id}</td><td>${client.frame_count}</td><td><span class="dot ${client.connected?'on':''}"></span>${client.connected?'connected':'uploaded'}</td></tr>`).join('') : '<tr><td colspan="3" class="muted">No clients yet</td></tr>';
+      document.querySelector('#job').textContent = `${data.job.status.toUpperCase()}${data.job.seconds ? ` — ${data.job.seconds}s` : ''}${data.job.error ? `\n${data.job.error}` : ''}`;
+      document.querySelector('#reconstruct').disabled = data.job.status === 'running' || !data.frame_count;
+      document.querySelector('#viewer').href = `/viewer?session=${encodeURIComponent(sessionId)}`;
+    }
+    document.querySelector('#load').onclick = () => { sessionId = input.value.trim(); history.replaceState(null,'',`?session=${encodeURIComponent(sessionId)}`); refresh(); };
+    document.querySelector('#reconstruct').onclick = async () => { await fetch(`/api/session/${encodeURIComponent(sessionId)}/reconstruct`, {method:'POST'}); refresh(); };
+    refresh(); setInterval(refresh, 1000);
+  </script>
+</body>
+</html>

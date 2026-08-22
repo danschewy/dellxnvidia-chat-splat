@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#07090d">
+  <title>ROOMSCAN — 3D reconstruction</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    html, body, #viewport { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #07090d; }
+    canvas { display: block; }
+    .bar { position: fixed; z-index: 2; left: 18px; right: 18px; top: max(18px, env(safe-area-inset-top)); display: flex; align-items: center; justify-content: space-between; pointer-events: none; }
+    .brand { letter-spacing: .18em; font-weight: 800; font-size: 13px; color: #fff; text-shadow: 0 1px 12px #000; }
+    .controls { pointer-events: auto; display: flex; gap: 10px; align-items: center; padding: 8px 11px; border: 1px solid #ffffff1f; border-radius: 14px; background: #10141dcc; backdrop-filter: blur(16px); box-shadow: 0 8px 30px #0008; }
+    button { border: 0; border-radius: 9px; padding: 8px 12px; color: #07100d; background: #77f2bc; font-weight: 800; cursor: pointer; }
+    label { color: #bac4d2; font-size: 12px; white-space: nowrap; }
+    input { accent-color: #77f2bc; vertical-align: middle; }
+    #message { position: fixed; inset: 0; display: grid; place-items: center; color: #d7dce5; font-size: 14px; pointer-events: none; }
+    #message[hidden] { display: none; }
+    #mode { position: fixed; z-index: 2; bottom: max(18px, env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%); color: #9aa7b7; background: #0b0f16b8; border: 1px solid #ffffff14; border-radius: 99px; padding: 7px 12px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+    @media (max-width: 620px) { .bar { align-items: flex-start; } .controls { flex-direction: column; align-items: stretch; } label { display: flex; justify-content: space-between; gap: 8px; } }
+  </style>
+  <script type="importmap">{"imports":{"three":"/static/vendor/three.module.js"}}</script>
+</head>
+<body>
+  <div id="viewport"></div>
+  <div class="bar">
+    <div class="brand">ROOMSCAN</div>
+    <div class="controls">
+      <button id="fly" type="button">Pause flythrough</button>
+      <label>Point size <input id="point-size" type="range" min="0.002" max="0.08" step="0.002" value="0.018"></label>
+    </div>
+  </div>
+  <div id="message">Loading reconstruction…</div>
+  <div id="mode">Recovered-camera flythrough</div>
+  <script type="module" src="/static/viewer.js"></script>
+</body>
+</html>

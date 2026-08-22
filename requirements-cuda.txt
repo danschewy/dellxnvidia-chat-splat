@@ -1,0 +1,12 @@
+# Install the NVIDIA-supported CUDA PyTorch build first; do not let pip replace it.
+numpy<2
+Pillow>=10
+opencv-python-headless>=4.9
+huggingface-hub>=0.24
+einops>=0.8
+safetensors>=0.4
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+ultralytics>=8.3,<9
+vggt @ git+https://github.com/facebookresearch/vggt.git
+gsplat>=1.5,<2
