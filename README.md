@@ -1,15 +1,25 @@
 # ROOMSCAN
 
-The hackathon pitch deck is a self-contained, keyboard-navigable HTML presentation at [`docs/pitch/ROOMSCAN-Pitch-Deck.html`](docs/pitch/ROOMSCAN-Pitch-Deck.html). Open it in a browser; use the arrow keys to present, `F` for fullscreen, or `P` to print to PDF.
+<p align="center">
+  <a href="https://danschewy.github.io/dellxnvidia-chat-splat/"><img src="docs/pitch/roomscan-live.png" alt="ROOMSCAN live multi-phone 3D room reconstruction" width="900"></a>
+</p>
+
+<p align="center">
+  <strong><a href="https://danschewy.github.io/dellxnvidia-chat-splat/">▶ OPEN THE LIVE PITCH DECK</a></strong>
+  &nbsp;·&nbsp;
+  <a href="https://danschewy.github.io/dellxnvidia-chat-splat/pitch/roomscan-demo.mp4">Watch the 23-second demo</a>
+</p>
+
+The deck is a self-contained, keyboard-navigable presentation. Use the arrow keys to present, `F` for fullscreen, or `P` to print to PDF. Its [source HTML](docs/pitch/ROOMSCAN-Pitch-Deck.html) is also stored in this repository.
 
 ## Demo
 
 <video controls playsinline preload="metadata" poster="docs/pitch/roomscan-live.png" width="100%">
-  <source src="docs/pitch/roomscan-demo.mp4" type="video/mp4">
+  <source src="https://danschewy.github.io/dellxnvidia-chat-splat/pitch/roomscan-demo.mp4" type="video/mp4">
   Your Markdown viewer cannot play embedded video. Use the direct link below.
 </video>
 
-[▶ Play or download the ROOMSCAN demo](docs/pitch/roomscan-demo.mp4)
+[▶ Play or download the ROOMSCAN demo](https://danschewy.github.io/dellxnvidia-chat-splat/pitch/roomscan-demo.mp4)
 
 ROOMSCAN turns frames from several phones into a shared colored point cloud and, when CUDA/gsplat is healthy, an optional Gaussian splat. The browser renders real splats with the locally vendored SparkJS renderer and falls back to Three.js points when no splat exists. It starts with a flythrough along one coherent recovered clip and reverses at its endpoints, so it never invents a path through empty space between phones.
 
