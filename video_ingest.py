@@ -56,6 +56,20 @@ def select_frame_candidates(
     return selected
 
 
+def _apply_video_orientation(frame: Any, degrees: int) -> Any:
+    """Apply container rotation when the OpenCV backend does not do it."""
+    import cv2
+
+    normalized = degrees % 360
+    if normalized == 90:
+        return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+    if normalized == 180:
+        return cv2.rotate(frame, cv2.ROTATE_180)
+    if normalized == 270:
+        return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    return frame
+
+
 def extract_sharp_frames(
     video_path: Path,
     frames_dir: Path,
@@ -68,6 +82,18 @@ def extract_sharp_frames(
     capture = cv2.VideoCapture(str(video_path))
     if not capture.isOpened():
         raise ValueError(f"OpenCV could not decode uploaded video: {video_path.name}")
+
+    orientation_meta_property = getattr(cv2, "CAP_PROP_ORIENTATION_META", None)
+    orientation_auto_property = getattr(cv2, "CAP_PROP_ORIENTATION_AUTO", None)
+    orientation_degrees = (
+        int(round(capture.get(orientation_meta_property)))
+        if orientation_meta_property is not None
+        else 0
+    )
+    orientation_is_automatic = False
+    if orientation_auto_property is not None:
+        capture.set(orientation_auto_property, 1)
+        orientation_is_automatic = capture.get(orientation_auto_property) >= 0.5
 
     target_fps = float(config["capture_fps"])
     source_fps = float(capture.get(cv2.CAP_PROP_FPS))
@@ -100,6 +126,8 @@ def extract_sharp_frames(
             ok, frame = capture.read()
             if not ok:
                 break
+            if not orientation_is_automatic:
+                frame = _apply_video_orientation(frame, orientation_degrees)
             frame_index = decoded
             decoded += 1
             if frame_index % sample_stride:

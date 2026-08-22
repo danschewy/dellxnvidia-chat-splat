@@ -10,7 +10,7 @@ import platform
 import time
 
 from backends import select_backend
-from models import import_gsplat_checked, load_vggt, load_yolo, pi3_path, vggt_path, yolo_path
+from models import import_gsplat_checked, load_vggt, load_yolo, pi3_path, pi3x_path, vggt_path, yolo_path
 from roomscan_io import load_config, resolve_weights_dir
 
 
@@ -62,6 +62,10 @@ def main() -> int:
         status("Pi3 fallback", "OK", str(pi3_path(weights)))
     except Exception as exc:
         status("Pi3 fallback", "OPTIONAL", str(exc))
+    try:
+        status("Pi3X unordered", "OK", str(pi3x_path(weights)))
+    except Exception as exc:
+        status("Pi3X unordered", "OPTIONAL", str(exc))
 
     try:
         import_gsplat_checked()

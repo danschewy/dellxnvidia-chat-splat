@@ -56,6 +56,44 @@ let modelLoading = false;
 const segmentMs = 1350;
 const cvToThree = new THREE.Matrix4().makeScale(1, -1, -1);
 
+function estimateRecoveredUp(matrices) {
+  const candidates = matrices.map((matrix) => (
+    new THREE.Vector3().setFromMatrixColumn(matrix, 1).normalize()
+  ));
+  if (!candidates.length) return new THREE.Vector3(0, 1, 0);
+
+  // Pick the camera-up axis with the strongest agreement, then align the
+  // remaining axes to it before averaging. This rejects an occasional 180°
+  // pose-roll error without assuming that model-space +Y is room-space up.
+  const reference = candidates.reduce((best, candidate) => {
+    const score = candidates.reduce((sum, other) => sum + Math.abs(candidate.dot(other)), 0);
+    return score > best.score ? { axis: candidate, score } : best;
+  }, { axis: candidates[0], score: -Infinity }).axis;
+  const recoveredUp = new THREE.Vector3();
+  candidates.forEach((candidate) => {
+    recoveredUp.addScaledVector(candidate, candidate.dot(reference) < 0 ? -1 : 1);
+  });
+  return recoveredUp.lengthSq() > 1e-8 ? recoveredUp.normalize() : reference.clone();
+}
+
+function leveledCameraPose(matrix, recoveredUp) {
+  const position = new THREE.Vector3().setFromMatrixPosition(matrix);
+  const forward = new THREE.Vector3(0, 0, -1).transformDirection(matrix);
+  const original = new THREE.Quaternion().setFromRotationMatrix(matrix);
+  if (Math.abs(forward.dot(recoveredUp)) > 0.985) {
+    return { position, quaternion: original };
+  }
+  const rotation = new THREE.Matrix4().lookAt(
+    position,
+    position.clone().add(forward),
+    recoveredUp,
+  );
+  return {
+    position,
+    quaternion: new THREE.Quaternion().setFromRotationMatrix(rotation),
+  };
+}
+
 function parseAsciiPly(text) {
   const end = text.indexOf('end_header');
   if (end < 0) throw new Error('PLY header is incomplete');
@@ -164,15 +202,17 @@ async function loadFlight(version = '', modelPath = '') {
     // recovered image height and gives the matching vertical field of view.
     recoveredFov = THREE.MathUtils.radToDeg(2 * Math.atan(principalY / focalY));
   }
+  const recoveredMatrices = cameras.map((entry) => {
+    const values = entry.T_wc.flat();
+    return new THREE.Matrix4().set(...values).multiply(cvToThree);
+  });
+  const recoveredUp = estimateRecoveredUp(recoveredMatrices);
   const recoveredFlight = flightCameras.map((entry) => {
     const values = entry.T_wc.flat();
     const matrix = new THREE.Matrix4().set(...values).multiply(cvToThree);
-    return {
-      position: new THREE.Vector3().setFromMatrixPosition(matrix),
-      quaternion: new THREE.Quaternion().setFromRotationMatrix(matrix),
-    };
+    return leveledCameraPose(matrix, recoveredUp);
   });
-  return { recoveredFlight, recoveredFov };
+  return { recoveredFlight, recoveredFov, recoveredUp };
 }
 
 function installModel(nextPoints, nextFlight) {
@@ -191,12 +231,16 @@ function installModel(nextPoints, nextFlight) {
   const isSplat = pointsObject.userData.roomscanKind === 'splat';
   sizeControl.hidden = isSplat;
   const sphere = pointsObject.userData.roomscanBoundingSphere;
+  const recoveredUp = nextFlight.recoveredUp ?? new THREE.Vector3(0, 1, 0);
+  camera.up.copy(recoveredUp);
   controls.target.copy(sphere.center);
-  camera.position.set(
-    sphere.center.x,
-    sphere.center.y + sphere.radius * 0.35,
-    sphere.center.z + sphere.radius * 1.15,
-  );
+  const orbitDirection = new THREE.Vector3(0, 0, 1)
+    .addScaledVector(recoveredUp, -recoveredUp.z);
+  if (orbitDirection.lengthSq() < 1e-8) orbitDirection.set(1, 0, 0);
+  orbitDirection.normalize();
+  camera.position.copy(sphere.center)
+    .addScaledVector(recoveredUp, sphere.radius * 0.35)
+    .addScaledVector(orbitDirection, sphere.radius * 1.15);
   if (nextFlight.recoveredFov) camera.fov = nextFlight.recoveredFov;
   camera.updateProjectionMatrix();
   flight = nextFlight.recoveredFlight;

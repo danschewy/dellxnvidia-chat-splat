@@ -12,19 +12,22 @@ from unittest import mock
 from backends import ReconstructionResult, select_backend
 from backends.stub import StubBackend
 from backends.vggt_backend import _invert_batched_se3
+from backends.pi3 import _estimate_pinhole_intrinsics
 import reconstruct
 import models
 from roomscan_io import evenly_subsample, load_config, read_points_ply
 from multiphone import (
     SimilarityTransform,
     apply_similarity,
+    capture_visual_quality,
     estimate_similarity_ransac,
     frame_identity,
     group_images_by_device,
     select_capture_aware,
+    select_quality_capture_aware,
     transform_reconstruction,
 )
-from splat_trainer import _background_shape
+from splat_trainer import _background_shape, _psnr_from_mse
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,7 +48,7 @@ class ContractTests(unittest.TestCase):
             "alignment_ransac_threshold_ratio", "alignment_ransac_iterations",
             "alignment_min_inliers", "alignment_min_inlier_ratio",
             "alignment_scale_min", "alignment_scale_max",
-            "vggt_preprocess_mode", "vggt_portrait_height",
+            "vggt_preprocess_mode", "vggt_portrait_height", "vggt_geometry_source",
             "frames_per_client", "mask_people", "gsplat_iterations", "point_size",
             "frame_selection",
             "video_upload", "video_bits_per_second", "max_video_upload_bytes",
@@ -58,12 +61,38 @@ class ContractTests(unittest.TestCase):
             "live_updates", "live_update_debounce_seconds",
             "live_update_max_wait_seconds", "viewer_refresh_seconds",
             "max_point_cloud_points", "splat_max_screen_size", "splat_exposure",
+            "splat_min_training_psnr",
             "weights_dir", "backend_override",
         }
         self.assertFalse(required - self.config.keys())
         self.assertEqual(self.config["vggt_resolution"], 518)
         self.assertEqual(self.config["max_frames"], 32)
-        self.assertIn(self.config["geometry_model"], {"vggt", "pi3"})
+        self.assertEqual(self.config["vggt_geometry_source"], "depth")
+        self.assertIn(self.config["geometry_model"], {"vggt", "pi3", "pi3x"})
+
+    def test_splat_psnr_uses_normalized_rgb_mse(self) -> None:
+        self.assertAlmostEqual(_psnr_from_mse(0.01), 20.0)
+        self.assertAlmostEqual(_psnr_from_mse(0.001), 30.0)
+
+    def test_capture_quality_prefers_detailed_landscape_room_view(self) -> None:
+        try:
+            import cv2
+            import numpy as np
+        except ImportError:
+            self.skipTest("NumPy/OpenCV are only required by real capture scoring")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            portrait = root / "portrait.jpg"
+            landscape = root / "landscape.jpg"
+            self.assertTrue(cv2.imwrite(str(portrait), np.zeros((120, 60, 3), dtype=np.uint8)))
+            checker = np.indices((60, 120)).sum(axis=0) % 2 * 255
+            self.assertTrue(
+                cv2.imwrite(str(landscape), np.repeat(checker[:, :, None], 3, axis=2).astype(np.uint8))
+            )
+            portrait_score, _ = capture_visual_quality([portrait])
+            landscape_score, detail = capture_visual_quality([landscape])
+            self.assertGreater(landscape_score, portrait_score)
+            self.assertEqual(detail["landscape"], 1.0)
 
     def test_explicit_stub_selection_requires_no_ml_dependencies(self) -> None:
         with mock.patch.dict(os.environ, {"ROOMSCAN_BACKEND": "stub"}):
@@ -113,6 +142,33 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(len(captures), 4)
         self.assertTrue(all(len(frames) == 4 for frames in captures.values()))
         self.assertEqual(set(group_images_by_device(selected)), {"phone_a"})
+
+    def test_quality_sampling_reserves_each_phone(self) -> None:
+        try:
+            import cv2
+            import numpy as np
+        except ImportError:
+            self.skipTest("NumPy/OpenCV are only required by real capture scoring")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            images = []
+            for device, brightness in (("phone_a", 220), ("phone_b", 80)):
+                for capture in range(3):
+                    for frame in range(6):
+                        path = root / f"{device}-cap{capture}_{frame:03d}.jpg"
+                        image = np.full((40, 80, 3), brightness, dtype=np.uint8)
+                        cv2.line(image, (0, frame + capture), (79, 39 - frame), (0, 0, 0), 2)
+                        self.assertTrue(cv2.imwrite(str(path), image))
+                        images.append(path)
+            selected = select_quality_capture_aware(images, 12, 4)
+            self.assertEqual(len(selected), 12)
+            self.assertEqual(set(group_images_by_device(selected)), {"phone_a", "phone_b"})
+            selected_capture_counts = {}
+            for path in selected:
+                capture = frame_identity(path).capture_id
+                selected_capture_counts[capture] = selected_capture_counts.get(capture, 0) + 1
+            self.assertEqual(len(selected_capture_counts), 3)
+            self.assertTrue(all(count == 4 for count in selected_capture_counts.values()))
 
     def test_similarity_ransac_recovers_scale_rotation_and_translation(self) -> None:
         try:
@@ -227,6 +283,32 @@ class ContractTests(unittest.TestCase):
 
         self.assertEqual(received_shapes, [(2, 3, 4)])
         self.assertEqual(inverted.shape, (1, 2, 4, 4))
+
+    def test_pi3_intrinsics_are_fit_from_camera_space_points(self) -> None:
+        try:
+            import numpy as np
+        except ImportError:
+            self.skipTest("NumPy is only required by the real ML backends")
+        height, width = 30, 50
+        fx, fy, cx, cy = 42.0, 44.0, 24.0, 14.0
+        pixel_x, pixel_y = np.meshgrid(np.arange(width), np.arange(height))
+        depth = np.full((height, width), 3.0)
+        local = np.stack(
+            (
+                (pixel_x - cx) / fx * depth,
+                (pixel_y - cy) / fy * depth,
+                depth,
+            ),
+            axis=-1,
+        )[None]
+        fitted = _estimate_pinhole_intrinsics(local, np.ones((1, height, width)), 99.0)[0]
+        self.assertTrue(
+            np.allclose(
+                fitted,
+                [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]],
+                atol=1e-6,
+            )
+        )
 
     def test_camera_quality_is_grouped_by_capture_and_detects_jumps(self) -> None:
         def camera(frame, x):

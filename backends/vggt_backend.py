@@ -76,14 +76,30 @@ class VggtBackend:
             value = predictions[name].detach().float().cpu().numpy()
             return value.squeeze(0)
 
-        points = array("world_points")
+        intrinsic_np = intrinsic.detach().float().cpu().numpy().squeeze(0)
+        extrinsic_np = extrinsic.detach().float().cpu().numpy().squeeze(0)
+        geometry_source = str(self.config["vggt_geometry_source"]).lower()
+        if geometry_source == "depth":
+            from vggt.utils.geometry import unproject_depth_map_to_point_map
+
+            # VGGT's official visualization and COLMAP/gsplat path defaults to
+            # unprojecting depth through its matching camera prediction. The
+            # separate point-map head can be visually plausible while still
+            # disagreeing with those cameras, which corrupts splat training.
+            points = unproject_depth_map_to_point_map(
+                array("depth"), extrinsic_np, intrinsic_np
+            )
+            confidences = array("depth_conf")
+        elif geometry_source == "point_map":
+            points = array("world_points")
+            confidences = array("world_points_conf")
+        else:
+            raise ValueError("vggt_geometry_source must be depth or point_map")
         point_layout = tuple(int(value) for value in points.shape[:3])
-        confidences = array("world_points_conf")
         colors = array("images")
         if colors.ndim == 4 and colors.shape[1] == 3:
             colors = colors.transpose(0, 2, 3, 1)
         colors = np.clip(colors * 255.0, 0, 255).astype(np.uint8)
-        intrinsic_np = intrinsic.detach().float().cpu().numpy().squeeze(0)
         camera_to_world = (
             _invert_batched_se3(extrinsic, closed_form_inverse_se3)
             .detach()

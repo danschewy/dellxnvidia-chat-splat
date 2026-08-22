@@ -38,6 +38,49 @@ class DenseSubmap:
     device_id: str
     reconstruction: ReconstructionResult
     images: list[Path]
+    quality_score: float = 0.0
+    quality_detail: dict[str, float] | None = None
+
+
+def capture_visual_quality(images: Sequence[Path]) -> tuple[float, dict[str, float]]:
+    """Rank fallback submaps by usable room coverage, not capture ID."""
+    import cv2
+    import numpy as np
+
+    empty = {
+        "landscape": 0.0,
+        "nonblack": 0.0,
+        "entropy": 0.0,
+        "edge_detail": 0.0,
+    }
+    measurements = []
+    for path in images:
+        image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        if image is None:
+            continue
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        histogram = cv2.calcHist([gray], [0], None, [64], [0, 256]).reshape(-1)
+        probabilities = histogram[histogram > 0] / max(float(histogram.sum()), 1.0)
+        entropy = float(-(probabilities * np.log2(probabilities)).sum()) / 6.0
+        measurements.append(
+            (
+                float(image.shape[1] >= image.shape[0]),
+                float((gray > 8).mean()),
+                entropy,
+                min(float(cv2.Laplacian(gray, cv2.CV_64F).var()) / 800.0, 1.0),
+            )
+        )
+    if not measurements:
+        return 0.0, empty
+    values = np.asarray(measurements, dtype=np.float64).mean(axis=0)
+    detail = {
+        "landscape": round(float(values[0]), 4),
+        "nonblack": round(float(values[1]), 4),
+        "entropy": round(float(values[2]), 4),
+        "edge_detail": round(float(values[3]), 4),
+    }
+    score = 4.0 * values[0] + 2.0 * values[1] + 2.0 * values[2] + values[3]
+    return round(float(score), 6), detail
 
 
 def frame_identity(path: Path | str) -> FrameIdentity:
@@ -106,6 +149,71 @@ def select_capture_aware(
     if len(selected) < limit:
         selected_set = set(selected)
         unused = [image for image in sorted(images) if image not in selected_set]
+        selected.extend(evenly_subsample(unused, min(limit - len(selected), len(unused))))
+    return selected[:limit]
+
+
+def select_quality_capture_aware(
+    images: Sequence[Path], limit: int, frames_per_capture: int
+) -> list[Path]:
+    """Select broad, usable coverage while retaining local motion per clip.
+
+    The best clip from each phone is reserved first, then remaining slots go
+    to the strongest room views globally. This prevents a lexicographically
+    early portrait/blank clip from defining a joint VGGT reconstruction.
+    """
+    if limit < 1:
+        raise ValueError("frame limit must be positive")
+    if frames_per_capture < 2:
+        raise ValueError("frames_per_capture must be at least 2")
+    if len(images) <= limit:
+        return list(images)
+
+    captures = group_images_by_capture(images)
+    ranked = []
+    for capture_id, paths in captures.items():
+        preview = evenly_subsample(paths, min(frames_per_capture, len(paths)))
+        score, detail = capture_visual_quality(preview)
+        ranked.append(
+            {
+                "capture_id": capture_id,
+                "device_id": frame_identity(paths[0]).device_id,
+                "paths": paths,
+                "score": score,
+                "detail": detail,
+            }
+        )
+    ranked.sort(key=lambda item: (-item["score"], item["capture_id"]))
+    capture_budget = min(len(ranked), max(1, limit // frames_per_capture))
+
+    best_by_device = {}
+    for candidate in ranked:
+        best_by_device.setdefault(candidate["device_id"], candidate)
+    chosen = sorted(
+        best_by_device.values(),
+        key=lambda item: (-item["score"], item["capture_id"]),
+    )[:capture_budget]
+    chosen_ids = {item["capture_id"] for item in chosen}
+    for candidate in ranked:
+        if len(chosen) >= capture_budget:
+            break
+        if candidate["capture_id"] not in chosen_ids:
+            chosen.append(candidate)
+            chosen_ids.add(candidate["capture_id"])
+
+    selected = []
+    for candidate in chosen:
+        remaining = limit - len(selected)
+        if remaining <= 0:
+            break
+        selected.extend(
+            evenly_subsample(
+                candidate["paths"], min(frames_per_capture, remaining)
+            )
+        )
+    if len(selected) < limit:
+        selected_set = set(selected)
+        unused = [image for image in images if image not in selected_set]
         selected.extend(evenly_subsample(unused, min(limit - len(selected), len(unused))))
     return selected[:limit]
 
@@ -416,7 +524,10 @@ def align_submaps(
 
     if not submaps:
         raise ValueError("At least one submap is required")
-    ordered = sorted(submaps, key=lambda item: (-len(item.images), item.submap_id))
+    ordered = sorted(
+        submaps,
+        key=lambda item: (-item.quality_score, -len(item.images), item.submap_id),
+    )
     by_submap = {submap.submap_id: submap for submap in ordered}
     anchor = ordered[0].submap_id
     transforms = {anchor: identity_similarity()}
@@ -478,6 +589,13 @@ def align_submaps(
         "skipped_submaps": sorted(pending),
         "aligned_devices": aligned_devices,
         "skipped_devices": skipped_devices,
+        "submap_quality": {
+            item.submap_id: {
+                "score": item.quality_score,
+                **(item.quality_detail or {}),
+            }
+            for item in ordered
+        },
         "links": links,
     }
 

@@ -18,12 +18,14 @@ from backends import Backend, ReconstructionResult, select_backend
 from multiphone import (
     DenseSubmap,
     align_submaps,
+    capture_visual_quality,
     concatenate_reconstructions,
     frame_identity,
     group_images_by_capture,
     group_images_by_device,
     identity_similarity,
     select_capture_aware,
+    select_quality_capture_aware,
     transform_reconstruction,
 )
 from roomscan_io import atomic_write_bytes, atomic_write_json, evenly_subsample, list_images, load_config, write_points_ply
@@ -369,14 +371,20 @@ def _select_pipeline_inputs(
         and len(device_groups) > 1
     )
     if not use_submaps:
-        selected = select_capture_aware(
-            images,
-            int(config["max_frames"]),
-            int(config["submap_frames_per_capture"]),
+        selector = (
+            select_capture_aware
+            if backend_name == "stub"
+            else select_quality_capture_aware
+        )
+        selected = selector(
+            images, int(config["max_frames"]), int(config["submap_frames_per_capture"])
         )
         return selected, {
             "mode": "single_sequence",
             "devices": sorted(device_groups),
+            "selected_captures": sorted(
+                {frame_identity(path).capture_id for path in selected}
+            ),
             "selected_frames_by_device": {
                 device: sum(frame_identity(path).device_id == device for path in selected)
                 for device in device_groups
@@ -419,14 +427,25 @@ def _reconstruct_capture_submaps(
     submaps = []
     for capture, images in grouped.items():
         dense, used_images = _reconstruct_with_backoff(backend, list(images))
+        quality_score, quality_detail = capture_visual_quality(used_images)
         submaps.append(
-            DenseSubmap(capture, frame_identity(images[0]).device_id, dense, used_images)
+            DenseSubmap(
+                capture,
+                frame_identity(images[0]).device_id,
+                dense,
+                used_images,
+                quality_score,
+                quality_detail,
+            )
         )
 
     try:
         transforms, alignment = align_submaps(submaps, config)
     except BaseException as exc:
-        anchor = max(submaps, key=lambda item: (len(item.images), item.submap_id))
+        anchor = max(
+            submaps,
+            key=lambda item: (item.quality_score, len(item.images), item.submap_id),
+        )
         transforms = {anchor.submap_id: identity_similarity()}
         alignment = {
             "mode": "per_capture_submaps",
@@ -446,6 +465,13 @@ def _reconstruct_capture_submaps(
                     if item.device_id != anchor.device_id
                 }
             ),
+            "submap_quality": {
+                item.submap_id: {
+                    "score": item.quality_score,
+                    **(item.quality_detail or {}),
+                }
+                for item in sorted(submaps, key=lambda candidate: candidate.submap_id)
+            },
             "links": [],
             "error": f"{type(exc).__name__}: {exc}",
         }

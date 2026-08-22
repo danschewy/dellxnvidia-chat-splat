@@ -61,6 +61,16 @@ def pi3_path(weights_dir: Path) -> Path:
     )
 
 
+def pi3x_path(weights_dir: Path) -> Path:
+    candidates = [weights_dir / "meta" / "Pi3X", weights_dir / "yyfz233" / "Pi3X"]
+    for candidate in candidates:
+        if candidate.is_dir() and (candidate / "model.safetensors").is_file():
+            return candidate
+    raise MissingWeightError(
+        f"Missing Pi3X weights (yyfz233/Pi3X). Expected local file: {candidates[0] / 'model.safetensors'}"
+    )
+
+
 def load_vggt(weights_dir: Path, device: str) -> Any:
     local_dir = vggt_path(weights_dir)
     try:
@@ -97,6 +107,19 @@ def load_pi3(weights_dir: Path, device: str) -> Any:
         model = Pi3.from_pretrained(str(local_dir), local_files_only=LOCAL_FILES_ONLY)
     except TypeError:
         model = Pi3.from_pretrained(str(local_dir))
+    return model.eval().to(device)
+
+
+def load_pi3x(weights_dir: Path, device: str) -> Any:
+    local_dir = pi3x_path(weights_dir)
+    try:
+        from pi3.models.pi3x import Pi3X
+    except ImportError as exc:
+        raise RuntimeError("Pi3X Python package is not installed; install requirements-cuda.txt") from exc
+    try:
+        model = Pi3X.from_pretrained(str(local_dir), local_files_only=LOCAL_FILES_ONLY)
+    except TypeError:
+        model = Pi3X.from_pretrained(str(local_dir))
     return model.eval().to(device)
 
 

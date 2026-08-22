@@ -26,7 +26,7 @@ Phone capture is video-first. The browser records one 15-second clip and sends i
 
 The server root is the room lobby. **New room scan** creates a filesystem-backed session and opens its capture page; a room code or full invite URL joins an existing session. Existing-room cards are newest-first and use the latest captured frame as their thumbnail. Direct QR links keep the stable `/?session=<room-id>` capture contract, and **View room** opens the shared reconstruction when one has been published.
 
-With `live_updates` enabled, every completed capture marks its session dirty. ROOMSCAN waits `live_update_debounce_seconds` for nearby clips to batch together, but `live_update_max_wait_seconds` forces a rebuild even when clips keep arriving. A clip completed during reconstruction schedules exactly one follow-up pass. Each model builds in a private staging directory and is published as an immutable revision; `current.json` atomically switches the viewer to matching point-cloud and camera files. Open viewers poll `model_version` and swap to the new cloud and camera path without a page reload. On the CUDA box, `live_update_train_splat` is enabled so each revision publishes its durable point cloud first and then upgrades to a Spark-rendered splat after gsplat completes; disable that knob only when trading visual quality for the shortest possible update latency.
+With `live_updates` enabled, every completed capture marks its session dirty. ROOMSCAN waits `live_update_debounce_seconds` for nearby clips to batch together, but `live_update_max_wait_seconds` forces a rebuild even when clips keep arriving. A clip completed during reconstruction schedules exactly one follow-up pass. Each model builds in a private staging directory and is published as an immutable revision; `current.json` atomically switches the viewer to matching point-cloud and camera files. Open viewers poll `model_version` and swap to the new cloud and camera path without a page reload. `live_update_train_splat` defaults off so the validated Pi3X geometry reaches viewers as soon as it is ready. Enable it only after the splat trainer passes its held-out camera quality gate on the target room; a rejected splat never replaces the durable point cloud.
 
 Automatic publication also checks camera continuity inside each phone clip. A clearly discontinuous rebuild cannot replace an already-published revision that passed the check: the status page reports `HELD`, the last good shared model remains visible, and a new clip can trigger another attempt. First models and explicit **Rebuild now** requests are never blocked by this heuristic.
 
@@ -104,16 +104,19 @@ Build the exact directory structure expected by `models.py`:
 
 ```bash
 export WEIGHTS=/absolute/path/to/hackathon-models
-mkdir -p "$WEIGHTS/meta/VGGT" "$WEIGHTS/meta/Pi3" "$WEIGHTS/yolo"
+mkdir -p "$WEIGHTS/meta/VGGT" "$WEIGHTS/meta/Pi3" "$WEIGHTS/meta/Pi3X" "$WEIGHTS/yolo"
 hf download facebook/VGGT-1B --include config.json --include model.safetensors \
   --local-dir "$WEIGHTS/meta/VGGT"
 hf download yyfz233/Pi3 --include config.json --include model.safetensors \
   --local-dir "$WEIGHTS/meta/Pi3"
+hf download yyfz233/Pi3X --include config.json --include model.safetensors \
+  --local-dir "$WEIGHTS/meta/Pi3X"
 curl -fL --retry 3 \
   -o "$WEIGHTS/yolo/yolo11s-seg.pt" \
   https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo11s-seg.pt
 hf cache verify facebook/VGGT-1B --local-dir "$WEIGHTS/meta/VGGT"
 hf cache verify yyfz233/Pi3 --local-dir "$WEIGHTS/meta/Pi3"
+hf cache verify yyfz233/Pi3X --local-dir "$WEIGHTS/meta/Pi3X"
 ```
 
 Clone and install the VGGT Python package during setup (the requirements files do this); its source code is separate from the weight bundle. Copy the completed virtual environment/source installation and weights to the offline box, or repeat installation while the box is still connected. Then disconnect networking and run:
@@ -124,7 +127,7 @@ HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 ROOMSCAN_WEIGHTS_DIR="$WEIGHTS" python c
 
 A missing model error always names the exact expected local path.
 
-VGGT is the default geometry model. Set `geometry_model` to `pi3` in `config.json` to force the permutation-equivariant fallback when input ordering is suspect. On CUDA, a non-OOM VGGT runtime failure also activates Pi3 automatically when its local weights are present; OOM still follows the frame-subsampling path first.
+Pi3X is the production geometry model for unordered crowd captures; its smoother point head and permutation-equivariant camera frame behaved better on the four-phone room test. Set `geometry_model` to `vggt` for a single coherent clip or `pi3` for the older cached fallback. On CUDA, a non-OOM VGGT runtime failure can still activate Pi3 when its local weights are present; OOM follows the frame-subsampling path first.
 
 ## When gsplat will not build
 

@@ -5,13 +5,28 @@ import tempfile
 import unittest
 
 from roomscan_io import load_config
-from video_ingest import extract_sharp_frames, select_frame_candidates, video_extension
+from video_ingest import (
+    _apply_video_orientation,
+    extract_sharp_frames,
+    select_frame_candidates,
+    video_extension,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class VideoIngestTests(unittest.TestCase):
+    def test_container_orientation_rotates_frames_before_selection(self) -> None:
+        try:
+            import numpy as np
+        except ImportError:
+            self.skipTest("NumPy is only required by video ingestion")
+        frame = np.arange(18, dtype=np.uint8).reshape(2, 3, 3)
+        self.assertEqual(_apply_video_orientation(frame, 90).shape, (3, 2, 3))
+        self.assertEqual(_apply_video_orientation(frame, 180).shape, frame.shape)
+        self.assertTrue(np.array_equal(_apply_video_orientation(frame, 360), frame))
+
     def test_temporal_selection_keeps_every_part_of_capture(self) -> None:
         candidates = [
             (1000.0 if index < 4 else float(index), index, bytes([index]))

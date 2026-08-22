@@ -17,10 +17,10 @@ class CudaBackend(VggtBackend):
 
     def reconstruct(self, images: Sequence[Path]) -> ReconstructionResult:
         geometry_model = str(self.config.get("geometry_model", "vggt")).lower()
-        if geometry_model == "pi3":
+        if geometry_model in {"pi3", "pi3x"}:
             return reconstruct_pi3(self.config, self.weights_dir, images)
         if geometry_model != "vggt":
-            raise ValueError("geometry_model must be vggt or pi3")
+            raise ValueError("geometry_model must be vggt, pi3, or pi3x")
         try:
             return super().reconstruct(images)
         except RuntimeError as vggt_error:

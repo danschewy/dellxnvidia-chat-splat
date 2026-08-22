@@ -21,6 +21,11 @@ def _background_shape(
     return (channels,) if packed else (camera_count, channels)
 
 
+def _psnr_from_mse(mse: float) -> float:
+    """Convert normalized RGB mean-squared error to PSNR."""
+    return -10.0 * math.log10(max(mse, 1e-12))
+
+
 def _encode_splat_ply(
     means: Any,
     sh0: Any,
@@ -154,6 +159,42 @@ def train_splat_bytes(
         optimizer.step()
         if step == 0 or (step + 1) % 250 == 0 or step + 1 == iterations:
             print(f"[gsplat] iteration {step + 1}/{iterations}, loss={loss.item():.5f}", flush=True)
+
+    # A splat that cannot reproduce its own posed inputs is almost always using
+    # inconsistent geometry/cameras. Reject it before it can replace the safer
+    # point-cloud view. This caught the former point-head/camera-head mismatch.
+    training_psnr = []
+    with torch.no_grad():
+        for camera_index in range(min(len(poses), len(targets))):
+            rendered, _alpha, _ = rasterization(
+                means=means,
+                quats=quats,
+                scales=torch.exp(log_scales),
+                opacities=torch.sigmoid(opacity_logits),
+                colors=torch.sigmoid(color_logits),
+                viewmats=viewmats[camera_index : camera_index + 1],
+                Ks=intrinsics[camera_index : camera_index + 1],
+                width=width,
+                height=height,
+                packed=packed,
+                sh_degree=None,
+                backgrounds=torch.zeros(_background_shape(packed, 1), device=device),
+            )
+            mse = float(torch.mean((rendered[0] - targets[camera_index]) ** 2).item())
+            training_psnr.append(_psnr_from_mse(mse))
+    mean_psnr = sum(training_psnr) / len(training_psnr)
+    worst_psnr = min(training_psnr)
+    minimum_psnr = float(config["splat_min_training_psnr"])
+    print(
+        f"[gsplat] validation mean_psnr={mean_psnr:.3f} "
+        f"worst_psnr={worst_psnr:.3f} required={minimum_psnr:.3f}",
+        flush=True,
+    )
+    if worst_psnr < minimum_psnr:
+        raise RuntimeError(
+            "Splat failed its training-view consistency check: "
+            f"worst PSNR {worst_psnr:.3f} dB < {minimum_psnr:.3f} dB"
+        )
 
     means_np = means.detach().cpu().numpy()
     colors_np = torch.sigmoid(color_logits).detach().cpu().numpy()
