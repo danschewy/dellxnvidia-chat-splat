@@ -73,6 +73,17 @@ def main() -> int:
     else:
         status("gsplat extension", "OK", "imported rasterization entry point")
 
+    try:
+        import cv2
+        video_io = cv2.getBuildInformation()
+        ffmpeg_enabled = "FFMPEG:                      YES" in video_io
+    except Exception as exc:
+        status("video decoder", "FAIL", str(exc))
+    else:
+        state = "OK" if ffmpeg_enabled else "FAIL"
+        detail = f"OpenCV {cv2.__version__}, FFmpeg {'enabled' if ffmpeg_enabled else 'disabled'}"
+        status("video decoder", state, detail)
+
     if not arguments.skip_model_smoke and backend.name in {"cuda", "mps"}:
         assert torch is not None
         started = time.perf_counter()

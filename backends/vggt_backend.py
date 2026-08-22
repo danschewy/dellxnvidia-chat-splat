@@ -53,7 +53,10 @@ class VggtBackend:
         from vggt.utils.load_fn import load_and_preprocess_images
         from vggt.utils.pose_enc import pose_encoding_to_extri_intri
 
-        tensors = load_and_preprocess_images([str(path) for path in images]).to(self.device)
+        tensors = load_and_preprocess_images(
+            [str(path) for path in images],
+            mode=str(self.config["vggt_preprocess_mode"]),
+        ).to(self.device)
         if tensors.shape[-1] > int(self.config["vggt_resolution"]) or tensors.shape[-2] > int(self.config["vggt_resolution"]):
             tensors = torch.nn.functional.interpolate(
                 tensors,

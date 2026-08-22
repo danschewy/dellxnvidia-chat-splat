@@ -6,6 +6,7 @@ import json
 import math
 import os
 from pathlib import Path
+import shutil
 import tempfile
 from typing import Any, Iterable, Sequence
 
@@ -20,9 +21,27 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
     required = {
         "max_frames",
         "vggt_resolution",
+        "vggt_preprocess_mode",
         "confidence_threshold",
         "blur_threshold",
         "frames_per_client",
+        "frame_selection",
+        "video_upload",
+        "video_bits_per_second",
+        "max_video_upload_bytes",
+        "max_video_decode_seconds",
+        "max_video_source_fps",
+        "upload_timeout_seconds",
+        "video_worker_count",
+        "inference_queue_limit",
+        "live_updates",
+        "live_update_debounce_seconds",
+        "live_update_max_wait_seconds",
+        "viewer_refresh_seconds",
+        "live_update_train_splat",
+        "quality_max_camera_step_ratio",
+        "quality_min_camera_steps",
+        "model_revision_retention",
         "mask_people",
         "gsplat_iterations",
         "splat_max_screen_size",
@@ -78,6 +97,22 @@ def atomic_write_bytes(path: Path, payload: bytes) -> None:
             os.unlink(temporary)
         except FileNotFoundError:
             pass
+        raise
+
+
+def atomic_copy_file(source: Path, target: Path) -> None:
+    """Copy a potentially large artifact and expose it only after fsync."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as output, source.open("rb") as input_file:
+            shutil.copyfileobj(input_file, output, length=1024 * 1024)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, target)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
         raise
 
 

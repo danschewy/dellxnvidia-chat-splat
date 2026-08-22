@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import sys
 from typing import Any
 
 
@@ -100,6 +101,14 @@ def load_pi3(weights_dir: Path, device: str) -> Any:
 
 
 def import_gsplat_checked() -> Any:
+    # gsplat's lazy CUDA build shells out to `ninja`. Calling a virtualenv's
+    # Python by absolute path does not necessarily put that virtualenv's bin
+    # directory on PATH (common under nohup/systemd), even when Ninja is
+    # installed in the environment.
+    interpreter_bin = str(Path(sys.executable).resolve().parent)
+    path_entries = [entry for entry in os.environ.get("PATH", "").split(os.pathsep) if entry]
+    if interpreter_bin not in path_entries:
+        os.environ["PATH"] = os.pathsep.join([interpreter_bin, *path_entries])
     try:
         import gsplat
         from gsplat import rasterization

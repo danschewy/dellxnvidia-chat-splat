@@ -16,6 +16,15 @@ class StaticTests(unittest.TestCase):
         self.assertIn("WALK SIDEWAYS", (ROOT / "static" / "index.html").read_text())
         self.assertIn("laplacian", source.lower())
         self.assertIn("image/jpeg", source)
+        self.assertIn("MediaRecorder", source)
+        self.assertIn("upload_kind: 'video'", source)
+        self.assertIn("uploadVideo(recordedVideo, captureId)", source)
+        self.assertIn("function sendAndWait", source)
+        self.assertIn("waitForSocketOpen", source)
+        self.assertIn("Upload timed out", source)
+        self.assertIn("selectTemporalFrames", source)
+        self.assertIn("resetForAnotherCapture", source)
+        self.assertIn("SCAN ANOTHER AREA", (ROOT / "static" / "index.html").read_text())
 
     def test_viewer_uses_only_local_runtime_modules(self) -> None:
         html = (ROOT / "static" / "viewer.html").read_text()
@@ -38,12 +47,19 @@ class StaticTests(unittest.TestCase):
         self.assertIn("renderer.domElement.height", source)
         self.assertIn("runtimeConfig.splat_max_screen_size", source)
         self.assertIn("runtimeConfig.splat_exposure", source)
+        self.assertIn("pollForModelUpdate", source)
+        self.assertIn("status.model_version", source)
+        self.assertIn("status.model_path", source)
+        self.assertIn("Updating shared reconstruction", source)
         self.assertRegex(source, r"fragmentShader: `[\s\S]*uniform float exposure;")
 
     def test_status_requires_manual_reconstruction(self) -> None:
         source = (ROOT / "static" / "status.html").read_text()
-        self.assertIn("Reconstruct", source)
+        self.assertIn("Rebuild now", source)
         self.assertIn("method:'POST'", source)
+        self.assertIn("Video queue", source)
+        self.assertIn("processing_videos", source)
+        self.assertIn("Live updates", source)
 
 
 if __name__ == "__main__":

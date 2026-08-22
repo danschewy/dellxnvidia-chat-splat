@@ -4,6 +4,8 @@ const count = document.querySelector('#count');
 const ring = document.querySelector('#ring');
 const motionWarning = document.querySelector('#motion');
 const toast = document.querySelector('#toast');
+const toastMessage = document.querySelector('#toast-message');
+const toastAction = document.querySelector('#toast-action');
 const headline = document.querySelector('#headline');
 const detail = document.querySelector('#detail');
 const sessionId = new URLSearchParams(location.search).get('session') || 'demo';
@@ -24,10 +26,24 @@ let rotationTravel = 0;
 let translationSignal = 0;
 let lastMotionTime = 0;
 let captureStarted = 0;
+let sampleIndex = 0;
 
-function showToast(html) {
-  toast.innerHTML = html;
+function showToast(html, actionLabel = 'SCAN ANOTHER AREA') {
+  toastMessage.innerHTML = html;
+  toastAction.textContent = actionLabel;
   toast.hidden = false;
+}
+
+function resetForAnotherCapture() {
+  toast.hidden = true;
+  startButton.hidden = false;
+  startButton.disabled = false;
+  startButton.textContent = 'START';
+  count.hidden = true;
+  count.textContent = String(config.capture_seconds);
+  ring.style.strokeDashoffset = '527.8';
+  headline.textContent = 'Walk a short arc around the room';
+  detail.textContent = 'Move sideways while aiming at walls and furniture.';
 }
 
 async function requestMotionPermission() {
@@ -91,9 +107,64 @@ async function sampleFrame() {
   context.drawImage(video, 0, 0, width, height);
   const score = blurScore(context.getImageData(0, 0, width, height));
   const blob = await canvasBlob();
-  candidates.push({ score, blob });
+  candidates.push({ score, blob, index: sampleIndex });
+  sampleIndex += 1;
   const bufferLimit = Math.max(config.frames_per_client * 2, Math.ceil(config.capture_seconds * config.capture_fps));
   if (candidates.length > bufferLimit) candidates.shift();
+}
+
+function selectTemporalFrames(frames, limit) {
+  if (frames.length <= limit) return frames;
+  if (config.frame_selection === 'sharpest') {
+    return [...frames].sort((a, b) => b.score - a.score).slice(0, limit)
+      .sort((a, b) => a.index - b.index);
+  }
+  const selected = [];
+  for (let window = 0; window < limit; window += 1) {
+    const start = Math.floor(window * frames.length / limit);
+    const end = Math.floor((window + 1) * frames.length / limit);
+    selected.push(frames.slice(start, end).reduce(
+      (best, frame) => (frame.score > best.score ? frame : best),
+    ));
+  }
+  return selected;
+}
+
+function preferredVideoMimeType() {
+  if (typeof MediaRecorder === 'undefined') return '';
+  const types = [
+    'video/mp4;codecs=h264',
+    'video/mp4',
+    'video/webm;codecs=vp8',
+    'video/webm',
+  ];
+  if (typeof MediaRecorder.isTypeSupported !== 'function') return '';
+  return types.find((type) => MediaRecorder.isTypeSupported(type)) || '';
+}
+
+function startVideoRecording(mediaStream) {
+  if (!config.video_upload || typeof MediaRecorder === 'undefined') return null;
+  const mimeType = preferredVideoMimeType();
+  const options = { videoBitsPerSecond: config.video_bits_per_second };
+  if (mimeType) options.mimeType = mimeType;
+  const recorder = new MediaRecorder(mediaStream, options);
+  const chunks = [];
+  const stopped = new Promise((resolve, reject) => {
+    recorder.addEventListener('dataavailable', (event) => {
+      if (event.data.size) chunks.push(event.data);
+    });
+    recorder.addEventListener('error', () => reject(new Error('Browser video recording failed')));
+    recorder.addEventListener('stop', () => {
+      resolve(new Blob(chunks, { type: recorder.mimeType || mimeType || 'video/webm' }));
+    });
+  });
+  recorder.start(1000);
+  return {
+    async stop() {
+      if (recorder.state !== 'inactive') recorder.stop();
+      return stopped;
+    },
+  };
 }
 
 function waitForSocket(socket, expectedType) {
@@ -104,31 +175,90 @@ function waitForSocket(socket, expectedType) {
       else if (value.type === expectedType) { cleanup(); resolve(value); }
     };
     const handleClose = () => { cleanup(); reject(new Error('Upload connection closed early')); };
+    const handleError = () => { cleanup(); reject(new Error('Upload connection failed')); };
+    const timer = setTimeout(() => {
+      cleanup();
+      socket.close();
+      reject(new Error('Upload timed out. Check Wi-Fi and try again.'));
+    }, config.upload_timeout_seconds * 1000);
     const cleanup = () => {
+      clearTimeout(timer);
       socket.removeEventListener('message', handleMessage);
       socket.removeEventListener('close', handleClose);
+      socket.removeEventListener('error', handleError);
     };
     socket.addEventListener('message', handleMessage);
     socket.addEventListener('close', handleClose);
+    socket.addEventListener('error', handleError);
   });
 }
 
-async function uploadFrames(frames) {
+function sendAndWait(socket, payload, expectedType) {
+  const response = waitForSocket(socket, expectedType);
+  try {
+    socket.send(payload);
+  } catch (error) {
+    socket.close();
+    throw error;
+  }
+  return response;
+}
+
+function waitForSocketOpen(socket) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      socket.close();
+      reject(new Error('Could not reach the upload server in time'));
+    }, config.upload_timeout_seconds * 1000);
+    const cleanup = () => {
+      clearTimeout(timer);
+      socket.removeEventListener('open', handleOpen);
+      socket.removeEventListener('error', handleError);
+    };
+    const handleOpen = () => { cleanup(); resolve(); };
+    const handleError = () => { cleanup(); reject(new Error('Could not connect to upload server')); };
+    socket.addEventListener('open', handleOpen, { once: true });
+    socket.addEventListener('error', handleError, { once: true });
+  });
+}
+
+async function uploadFrames(frames, captureId) {
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const socket = new WebSocket(`${protocol}//${location.host}/ws/upload`);
-  await new Promise((resolve, reject) => {
-    socket.addEventListener('open', resolve, { once: true });
-    socket.addEventListener('error', () => reject(new Error('Could not connect to upload server')), { once: true });
-  });
-  socket.send(JSON.stringify({ type: 'start', session_id: sessionId, client_id: clientId, frame_count: frames.length }));
-  await waitForSocket(socket, 'ready');
-  for (let index = 0; index < frames.length; index += 1) {
-    detail.textContent = `Uploading ${index + 1} of ${frames.length}…`;
-    socket.send(await frames[index].blob.arrayBuffer());
-    await waitForSocket(socket, 'ack');
+  try {
+    await waitForSocketOpen(socket);
+    await sendAndWait(socket, JSON.stringify({
+      type: 'start', session_id: sessionId, client_id: captureId,
+      upload_kind: 'frames', frame_count: frames.length,
+    }), 'ready');
+    for (let index = 0; index < frames.length; index += 1) {
+      detail.textContent = `Uploading ${index + 1} of ${frames.length}…`;
+      const payload = await frames[index].blob.arrayBuffer();
+      await sendAndWait(socket, payload, 'ack');
+    }
+    return await sendAndWait(socket, JSON.stringify({ type: 'complete' }), 'complete');
+  } finally {
+    if (socket.readyState < WebSocket.CLOSING) socket.close();
   }
-  socket.send(JSON.stringify({ type: 'complete' }));
-  return waitForSocket(socket, 'complete');
+}
+
+async function uploadVideo(blob, captureId) {
+  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const socket = new WebSocket(`${protocol}//${location.host}/ws/upload`);
+  try {
+    await waitForSocketOpen(socket);
+    await sendAndWait(socket, JSON.stringify({
+      type: 'start', session_id: sessionId, client_id: captureId,
+      upload_kind: 'video', mime_type: blob.type,
+    }), 'ready');
+    detail.textContent = `Uploading ${(blob.size / 1_000_000).toFixed(1)} MB video…`;
+    const payload = await blob.arrayBuffer();
+    await sendAndWait(socket, payload, 'ack');
+    return await sendAndWait(socket, JSON.stringify({ type: 'complete' }), 'complete');
+  } finally {
+    if (socket.readyState < WebSocket.CLOSING) socket.close();
+  }
 }
 
 async function beginCapture() {
@@ -144,10 +274,11 @@ async function beginCapture() {
     if (!video.videoWidth) throw new Error('Camera did not become ready');
   } catch (error) {
     startButton.disabled = false;
-    showToast(`${error.message}<br><br>Camera and motion access require HTTPS. Reload to try again.`);
+    showToast(`${error.message}<br><br>Camera and motion access require HTTPS.`, 'TRY AGAIN');
     return;
   }
   candidates = [];
+  sampleIndex = 0;
   rotationTravel = 0;
   translationSignal = 0;
   lastMotionTime = 0;
@@ -158,6 +289,12 @@ async function beginCapture() {
   count.hidden = false;
   headline.textContent = 'Keep moving sideways';
   detail.textContent = 'Aim steadily at walls, corners, and furniture.';
+  let videoRecording = null;
+  try {
+    videoRecording = startVideoRecording(stream);
+  } catch {
+    // The rolling JPEG buffer below is the compatibility fallback.
+  }
   const durationMs = config.capture_seconds * 1000;
   const sampleEveryMs = 1000 / config.capture_fps;
   let nextSample = 0;
@@ -180,20 +317,34 @@ async function beginCapture() {
   removeEventListener('devicemotion', handleMotion);
   motionWarning.classList.remove('show');
   count.textContent = '✓';
-  headline.textContent = 'Selecting sharp frames';
-  const sharp = candidates
-    .sort((a, b) => b.score - a.score)
-    .slice(0, config.frames_per_client);
+  let recordedVideo = null;
+  if (videoRecording) {
+    try {
+      recordedVideo = await videoRecording.stop();
+    } catch {
+      recordedVideo = null;
+    }
+  }
+  const sharp = selectTemporalFrames(candidates, config.frames_per_client);
   const passing = sharp.filter((frame) => frame.score >= config.blur_threshold).length;
-  detail.textContent = `${passing}/${sharp.length} frames passed the sharpness target. Uploading…`;
+  const captureId = `${clientId}-${Date.now().toString(36)}`;
   try {
-    const result = await uploadFrames(sharp);
-    showToast(`<strong>Upload complete</strong><br>${result.frames} sharp frames joined session <b>${sessionId}</b>.<br><br>You can put your phone away.`);
+    if (recordedVideo && recordedVideo.size > 0 && recordedVideo.size <= config.max_video_upload_bytes) {
+      headline.textContent = 'Sending video to queue';
+      await uploadVideo(recordedVideo, captureId);
+      showToast(`<strong>Video queued</strong><br>The server is selecting sharp frames for session <b>${sessionId}</b>.<br><br>You can put your phone away.`);
+    } else {
+      headline.textContent = 'Selecting sharp frames';
+      detail.textContent = `${passing}/${sharp.length} frames passed the sharpness target. Uploading fallback frames…`;
+      const result = await uploadFrames(sharp, captureId);
+      showToast(`<strong>Upload complete</strong><br>${result.frames} sharp frames joined session <b>${sessionId}</b>.<br><br>You can put your phone away.`);
+    }
   } catch (error) {
-    showToast(`<strong>Upload failed</strong><br>${error.message}<br><br>Your captured frames remain in this tab; reload to retry the scan.`);
+    showToast(`<strong>Upload failed</strong><br>${error.message}`, 'TRY AGAIN');
   } finally {
     stream?.getTracks().forEach((track) => track.stop());
   }
 }
 
 startButton.addEventListener('click', beginCapture);
+toastAction.addEventListener('click', resetForAnotherCapture);

@@ -7,10 +7,12 @@ import argparse
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+import math
+import statistics
 import shutil
 import sys
 import time
-from typing import Any, Iterator, Sequence
+from typing import Any, Callable, Iterator, Sequence
 
 from backends import Backend, ReconstructionResult, select_backend
 from roomscan_io import atomic_write_bytes, atomic_write_json, evenly_subsample, list_images, load_config, write_points_ply
@@ -58,18 +60,56 @@ def _copy_inputs(images: Sequence[Path], frames_dir: Path) -> list[Path]:
     return copied
 
 
-def _resize_for_vggt(images: Sequence[Path], out_dir: Path, resolution: int) -> list[Path]:
+def _resize_for_vggt(
+    images: Sequence[Path],
+    out_dir: Path,
+    resolution: int,
+    mode: str,
+) -> list[Path]:
     try:
-        from PIL import Image
+        from PIL import Image, ImageOps
     except ImportError as exc:
         raise RuntimeError("Pillow is required for CUDA/MPS image preparation") from exc
+    if mode not in {"crop", "pad"}:
+        raise ValueError("vggt_preprocess_mode must be crop or pad")
     out_dir.mkdir(parents=True, exist_ok=True)
     outputs = []
     for source in images:
         target = out_dir / source.name
         with Image.open(source) as image:
-            image = image.convert("RGB")
-            image.thumbnail((resolution, resolution), Image.Resampling.LANCZOS)
+            image = ImageOps.exif_transpose(image).convert("RGB")
+            width, height = image.size
+            if mode == "crop":
+                target_width = resolution
+                target_height = max(
+                    14, round(height * (target_width / width) / 14) * 14
+                )
+                image = image.resize(
+                    (target_width, target_height), Image.Resampling.BICUBIC
+                )
+                if target_height > resolution:
+                    top = (target_height - resolution) // 2
+                    image = image.crop((0, top, resolution, top + resolution))
+            else:
+                if width >= height:
+                    target_width = resolution
+                    target_height = max(
+                        14, round(height * (target_width / width) / 14) * 14
+                    )
+                else:
+                    target_height = resolution
+                    target_width = max(
+                        14, round(width * (target_height / height) / 14) * 14
+                    )
+                image = image.resize(
+                    (target_width, target_height), Image.Resampling.BICUBIC
+                )
+                canvas = Image.new("RGB", (resolution, resolution), (255, 255, 255))
+                canvas.paste(
+                    image,
+                    ((resolution - target_width) // 2, (resolution - target_height) // 2),
+                )
+                image = canvas
             image.save(target, format="JPEG", quality=90, optimize=True)
         outputs.append(target)
     return outputs
@@ -166,6 +206,73 @@ def _filter_points(result: ReconstructionResult, threshold: float) -> Reconstruc
     return ReconstructionResult(points[keep], colors[keep], confidences[keep], result.cameras)
 
 
+def _camera_path_quality(
+    cameras: Sequence[dict[str, Any]],
+    max_step_ratio: float,
+    minimum_steps: int,
+) -> dict[str, Any]:
+    """Measure trajectory jumps within clips without comparing different phones."""
+    if max_step_ratio <= 1:
+        raise ValueError("quality_max_camera_step_ratio must be greater than 1")
+    if minimum_steps < 1:
+        raise ValueError("quality_min_camera_steps must be positive")
+
+    captures: dict[str, list[list[float]]] = {}
+    all_positions: list[list[float]] = []
+    for index, camera in enumerate(cameras):
+        transform = camera.get("T_wc")
+        if not isinstance(transform, list) or len(transform) < 3:
+            continue
+        try:
+            position = [float(transform[axis][3]) for axis in range(3)]
+        except (IndexError, TypeError, ValueError):
+            continue
+        if not all(math.isfinite(value) for value in position):
+            continue
+        frame = Path(str(camera.get("frame", index))).stem
+        prefix, separator, suffix = frame.rpartition("_")
+        capture = prefix if separator and suffix.isdigit() else "__sequence__"
+        captures.setdefault(capture, []).append(position)
+        all_positions.append(position)
+
+    eligible = {
+        capture: positions
+        for capture, positions in captures.items()
+        if len(positions) - 1 >= minimum_steps
+    }
+    if not eligible and len(all_positions) - 1 >= minimum_steps:
+        eligible = {"__sequence__": all_positions}
+
+    per_capture = []
+    for capture, positions in eligible.items():
+        steps = [math.dist(first, second) for first, second in zip(positions, positions[1:])]
+        if not steps:
+            continue
+        median_step = statistics.median(steps)
+        largest_step = max(steps)
+        ratio = largest_step / max(median_step, 1e-9)
+        per_capture.append(
+            {
+                "capture": capture,
+                "step_count": len(steps),
+                "median_step": round(median_step, 7),
+                "max_step": round(largest_step, 7),
+                "max_step_ratio": round(ratio, 4),
+            }
+        )
+
+    worst = max(per_capture, key=lambda item: item["max_step_ratio"], default=None)
+    observed_ratio = float(worst["max_step_ratio"]) if worst else None
+    return {
+        "evaluated_capture_count": len(per_capture),
+        "max_allowed_step_ratio": max_step_ratio,
+        "max_step_ratio": observed_ratio,
+        "worst_capture": worst["capture"] if worst else None,
+        "continuous": observed_ratio is None or observed_ratio <= max_step_ratio,
+        "captures": per_capture,
+    }
+
+
 def _exclude_masked_points(
     result: ReconstructionResult, masks: Sequence[Any]
 ) -> tuple[ReconstructionResult, int]:
@@ -204,9 +311,16 @@ def _exclude_masked_points(
     ), removed
 
 
-def run_pipeline(image_dir: Path, out_dir: Path, config_path: Path | None = None) -> dict[str, Any]:
+def run_pipeline(
+    image_dir: Path,
+    out_dir: Path,
+    config_path: Path | None = None,
+    geometry_ready: Callable[[Path], None] | None = None,
+    train_splat: bool = True,
+    backend: Backend | None = None,
+) -> dict[str, Any]:
     config = load_config(config_path)
-    backend = select_backend(config, ROOT)
+    backend = backend or select_backend(config, ROOT)
     out_dir.mkdir(parents=True, exist_ok=True)
     meta: dict[str, Any] = {
         "backend": backend.name,
@@ -229,7 +343,10 @@ def run_pipeline(image_dir: Path, out_dir: Path, config_path: Path | None = None
 
         with timed_stage(meta, "resize"):
             prepared = frames if backend.name == "stub" else _resize_for_vggt(
-                frames, out_dir / "work" / "resized", int(config["vggt_resolution"])
+                frames,
+                out_dir / "work" / "resized",
+                int(config["vggt_resolution"]),
+                str(config["vggt_preprocess_mode"]),
             )
         _persist_meta(out_dir, meta)
 
@@ -257,12 +374,36 @@ def run_pipeline(image_dir: Path, out_dir: Path, config_path: Path | None = None
             meta["selected_frame_count"] = len(used_images)
             meta["point_count"] = len(reconstruction.points)
             meta["masked_point_count"] = removed_people_points
+            camera_quality = _camera_path_quality(
+                reconstruction.cameras,
+                float(config["quality_max_camera_step_ratio"]),
+                int(config["quality_min_camera_steps"]),
+            )
+            warnings = []
+            if not camera_quality["continuous"]:
+                warnings.append(
+                    "camera_path_discontinuity: "
+                    f"{camera_quality['worst_capture']} has step ratio "
+                    f"{camera_quality['max_step_ratio']}"
+                )
+            meta["quality"] = {
+                "camera_path": camera_quality,
+                "warnings": warnings,
+            }
         _persist_meta(out_dir, meta)
+        if geometry_ready is not None:
+            geometry_ready(out_dir)
 
         # Point and camera artifacts have been fsynced before this optional stage.
         try:
             with timed_stage(meta, "train_splat"):
-                splat = backend.train_splat(reconstruction.cameras, reconstruction, used_images)
+                if train_splat:
+                    splat = backend.train_splat(
+                        reconstruction.cameras, reconstruction, used_images
+                    )
+                else:
+                    splat = None
+                    meta["stages"]["train_splat"]["detail"] = "disabled for live update"
                 if splat is not None:
                     atomic_write_bytes(out_dir / "splat.ply", splat)
                     meta["splat_available"] = True

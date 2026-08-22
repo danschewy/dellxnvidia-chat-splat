@@ -12,6 +12,7 @@ const base = session ? `/session/${encodeURIComponent(session)}/` : '/sample_dat
 let configuredPointSize = Number(sizeInput.value);
 let maxSplatScreenSize = Number.POSITIVE_INFINITY;
 let splatExposure = 1;
+let viewerRefreshMs = 2000;
 try {
   const runtimeConfig = await fetch('/api/config', { cache: 'no-store' }).then((response) => {
     if (!response.ok) throw new Error('static preview');
@@ -21,6 +22,7 @@ try {
   configuredPointSize = Number(runtimeConfig.point_size);
   maxSplatScreenSize = Number(runtimeConfig.splat_max_screen_size);
   splatExposure = Number(runtimeConfig.splat_exposure);
+  viewerRefreshMs = Number(runtimeConfig.viewer_refresh_seconds) * 1000;
 } catch {
   // Standalone sample_data previews use the value embedded in viewer.html.
 }
@@ -42,6 +44,8 @@ let pointsObject;
 let flight = [];
 let flying = true;
 let flightStart = performance.now();
+let modelVersion = '';
+let modelLoading = false;
 const segmentMs = 1350;
 const cvToThree = new THREE.Matrix4().makeScale(1, -1, -1);
 
@@ -146,9 +150,11 @@ function splatMaterial() {
   });
 }
 
-async function loadCloud() {
-  let response = await fetch(`${base}splat.ply`, { cache: 'no-store' });
-  if (!response.ok) response = await fetch(`${base}points.ply`, { cache: 'no-store' });
+async function loadCloud(version = '', modelPath = '') {
+  const suffix = version ? `?v=${encodeURIComponent(version)}` : '';
+  const revisionBase = `${base}${modelPath}`;
+  let response = await fetch(`${revisionBase}splat.ply${suffix}`, { cache: 'no-store' });
+  if (!response.ok) response = await fetch(`${revisionBase}points.ply${suffix}`, { cache: 'no-store' });
   if (!response.ok) throw new Error('No reconstruction is available for this session');
   let parsed;
   try {
@@ -156,7 +162,7 @@ async function loadCloud() {
   } catch (error) {
     // A splat format the lightweight viewer cannot read must not prevent the
     // point-cloud safety artifact from loading.
-    const fallback = await fetch(`${base}points.ply`, { cache: 'no-store' });
+    const fallback = await fetch(`${revisionBase}points.ply${suffix}`, { cache: 'no-store' });
     if (!fallback.ok) throw error;
     parsed = parseAsciiPly(await fallback.text());
   }
@@ -177,29 +183,25 @@ async function loadCloud() {
     transparent: true,
     opacity: 0.98,
   });
-  pointsObject = new THREE.Points(geometry, material);
-  scene.add(pointsObject);
-  const sphere = geometry.boundingSphere;
-  controls.target.copy(sphere.center);
-  camera.position.set(sphere.center.x, sphere.center.y + sphere.radius * 0.35, sphere.center.z + sphere.radius * 1.15);
-  controls.update();
   material.size = Number(sizeInput.value);
+  return new THREE.Points(geometry, material);
 }
 
-async function loadFlight() {
-  const response = await fetch(`${base}cameras.json`, { cache: 'no-store' });
+async function loadFlight(version = '', modelPath = '') {
+  const suffix = version ? `?v=${encodeURIComponent(version)}` : '';
+  const response = await fetch(`${base}${modelPath}cameras.json${suffix}`, { cache: 'no-store' });
   if (!response.ok) throw new Error('Camera path is unavailable');
   const cameras = await response.json();
   const referenceK = cameras[0]?.K;
   const focalY = Number(referenceK?.[1]?.[1]);
   const principalY = Number(referenceK?.[1]?.[2]);
+  let recoveredFov;
   if (focalY > 0 && principalY > 0) {
     // K uses image pixels. VGGT centers the principal point, so 2*cy is the
     // recovered image height and gives the matching vertical field of view.
-    camera.fov = THREE.MathUtils.radToDeg(2 * Math.atan(principalY / focalY));
-    camera.updateProjectionMatrix();
+    recoveredFov = THREE.MathUtils.radToDeg(2 * Math.atan(principalY / focalY));
   }
-  flight = cameras.map((entry) => {
+  const recoveredFlight = cameras.map((entry) => {
     const values = entry.T_wc.flat();
     const matrix = new THREE.Matrix4().set(...values).multiply(cvToThree);
     return {
@@ -207,7 +209,76 @@ async function loadFlight() {
       quaternion: new THREE.Quaternion().setFromRotationMatrix(matrix),
     };
   });
-  if (flight.length < 2) flying = false;
+  return { recoveredFlight, recoveredFov };
+}
+
+function installModel(nextPoints, nextFlight) {
+  const previous = pointsObject;
+  pointsObject = nextPoints;
+  scene.add(pointsObject);
+  if (previous) {
+    scene.remove(previous);
+    previous.geometry.dispose();
+    previous.material.dispose();
+  }
+  const sphere = pointsObject.geometry.boundingSphere;
+  controls.target.copy(sphere.center);
+  camera.position.set(
+    sphere.center.x,
+    sphere.center.y + sphere.radius * 0.35,
+    sphere.center.z + sphere.radius * 1.15,
+  );
+  if (nextFlight.recoveredFov) camera.fov = nextFlight.recoveredFov;
+  camera.updateProjectionMatrix();
+  flight = nextFlight.recoveredFlight;
+  flying = flight.length >= 2;
+  controls.enabled = !flying;
+  flyButton.textContent = flying ? 'Pause flythrough' : 'Resume flythrough';
+  mode.textContent = flying ? 'Recovered-camera flythrough' : 'Free orbit';
+  controls.update();
+  updateSplatPointScale();
+  flightStart = performance.now();
+}
+
+async function reloadModel(version = '', modelPath = '') {
+  if (modelLoading) return;
+  modelLoading = true;
+  if (pointsObject) {
+    message.textContent = 'Updating shared reconstruction…';
+    message.hidden = false;
+  }
+  try {
+    const [nextPoints, nextFlight] = await Promise.all([
+      loadCloud(version, modelPath), loadFlight(version, modelPath),
+    ]);
+    installModel(nextPoints, nextFlight);
+    message.hidden = true;
+    if (version) modelVersion = String(version);
+  } finally {
+    modelLoading = false;
+  }
+}
+
+async function pollForModelUpdate() {
+  if (!session) return;
+  try {
+    const response = await fetch(`/api/session/${encodeURIComponent(session)}/status`, {
+      cache: 'no-store',
+    });
+    if (!response.ok) return;
+    const status = await response.json();
+    const nextVersion = String(status.model_version || '');
+    if (status.viewer_ready && nextVersion && nextVersion !== modelVersion) {
+      await reloadModel(nextVersion, String(status.model_path || ''));
+    } else if (status.job.status === 'running' && pointsObject) {
+      message.textContent = 'Updating shared reconstruction…';
+      message.hidden = false;
+    } else if (pointsObject) {
+      message.hidden = true;
+    }
+  } catch {
+    // Keep the last good model visible through transient status failures.
+  }
 }
 
 function smoothstep(value) { return value * value * (3 - 2 * value); }
@@ -259,14 +330,19 @@ addEventListener('resize', () => {
 });
 
 try {
-  await Promise.all([loadCloud(), loadFlight()]);
-  updateSplatPointScale();
-  controls.enabled = false;
-  message.hidden = true;
-  flightStart = performance.now();
+  if (session) {
+    const status = await fetch(`/api/session/${encodeURIComponent(session)}/status`, {
+      cache: 'no-store',
+    }).then((response) => response.json());
+    const initialVersion = String(status.model_version || '');
+    await reloadModel(initialVersion, String(status.model_path || ''));
+  } else {
+    await reloadModel();
+  }
 } catch (error) {
   message.textContent = error.message;
   flying = false;
   controls.enabled = true;
 }
+if (session) setInterval(pollForModelUpdate, viewerRefreshMs);
 requestAnimationFrame(animate);

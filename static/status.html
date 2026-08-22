@@ -14,21 +14,21 @@
     .row { display: flex; gap: 10px; } input, button, a { border: 1px solid #ffffff1e; border-radius: 10px; padding: 11px 14px; font: inherit; }
     input { min-width: 0; background: #111722; color: #fff; } button, a { background: #72efb7; color: #06100c; font-weight: 800; cursor: pointer; text-decoration: none; }
     button:disabled { background: #28302f; color: #87918e; cursor: wait; }
-    .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 22px 0; }
+    .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 22px 0; }
     .card, table { width: 100%; border: 1px solid #ffffff18; background: #0e131c; border-radius: 14px; }
     .card { padding: 18px; } .value { display: block; font-size: 30px; font-weight: 900; margin-top: 5px; }
     table { border-collapse: separate; border-spacing: 0; overflow: hidden; } th, td { padding: 13px 15px; text-align: left; border-bottom: 1px solid #ffffff10; } tr:last-child td { border: 0; }
-    .dot { display: inline-block; width: 8px; height: 8px; margin-right: 7px; border-radius: 50%; background: #596170; }.dot.on { background: #72efb7; box-shadow: 0 0 10px #72efb7; }
+    .dot { display: inline-block; width: 8px; height: 8px; margin-right: 7px; border-radius: 50%; background: #596170; }.dot.on, .dot.ready { background: #72efb7; box-shadow: 0 0 10px #72efb7; }.dot.uploading, .dot.queued, .dot.processing { background: #ffd166; }.dot.failed { background: #ff6262; }
     #job { margin: 18px 0; padding: 14px; color: #aab5c4; background: #111722; border-radius: 10px; white-space: pre-wrap; }
     @media (max-width: 580px) { header { display: block; } .row { margin-top: 18px; } .stats { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
   <header><div><h1>ROOMSCAN</h1><div class="muted">Crowd capture console</div></div><div class="row"><input id="session" value="demo" aria-label="Session ID"><button id="load">Load</button></div></header>
-  <div class="stats"><div class="card">Connected<span class="value" id="connected">0</span></div><div class="card">Total frames<span class="value" id="frames">0</span></div><div class="card">Backend<span class="value" id="backend">—</span></div></div>
+  <div class="stats"><div class="card">Connected<span class="value" id="connected">0</span></div><div class="card">Video queue<span class="value" id="processing">0</span></div><div class="card">Total frames<span class="value" id="frames">0</span></div><div class="card">Backend<span class="value" id="backend">—</span></div></div>
   <table><thead><tr><th>Client</th><th>Frames</th><th>State</th></tr></thead><tbody id="clients"><tr><td colspan="3" class="muted">No clients yet</td></tr></tbody></table>
-  <div id="job">Idle — reconstruction only starts when you press the button.</div>
-  <div class="row"><button id="reconstruct">Reconstruct</button><a id="viewer" href="/viewer?session=demo">Open viewer</a></div>
+  <div id="job">Live updates are on — completed clips are batched into the shared model.</div>
+  <div class="row"><button id="reconstruct">Rebuild now</button><a id="viewer" href="/viewer?session=demo">Open viewer</a></div>
   <script>
     const input = document.querySelector('#session');
     input.value = new URLSearchParams(location.search).get('session') || 'demo';
@@ -38,11 +38,13 @@
       if (!response.ok) return;
       const data = await response.json();
       document.querySelector('#connected').textContent = data.connected_clients;
+      document.querySelector('#processing').textContent = data.processing_videos;
       document.querySelector('#frames').textContent = data.frame_count;
       document.querySelector('#backend').textContent = data.backend.toUpperCase();
-      document.querySelector('#clients').innerHTML = data.clients.length ? data.clients.map(client => `<tr><td>${client.client_id}</td><td>${client.frame_count}</td><td><span class="dot ${client.connected?'on':''}"></span>${client.connected?'connected':'uploaded'}</td></tr>`).join('') : '<tr><td colspan="3" class="muted">No clients yet</td></tr>';
-      document.querySelector('#job').textContent = `${data.job.status.toUpperCase()}${data.job.seconds ? ` — ${data.job.seconds}s` : ''}${data.job.error ? `\n${data.job.error}` : ''}`;
-      document.querySelector('#reconstruct').disabled = data.job.status === 'running' || !data.frame_count;
+      document.querySelector('#clients').innerHTML = data.clients.length ? data.clients.map(client => `<tr><td>${client.client_id}</td><td>${client.frame_count}</td><td><span class="dot ${client.connected?'on':client.state}"></span>${client.connected?'connected':client.state}</td></tr>`).join('') : '<tr><td colspan="3" class="muted">No clients yet</td></tr>';
+      const live = data.live_updates ? `Live updates ON${data.update_pending ? ' — update pending' : ''}\n` : '';
+      document.querySelector('#job').textContent = `${live}${data.job.status.toUpperCase()}${data.job.seconds ? ` — ${data.job.seconds}s` : ''}${data.job.error ? `\n${data.job.error}` : ''}`;
+      document.querySelector('#reconstruct').disabled = ['queued', 'running'].includes(data.job.status) || data.processing_videos > 0 || !data.frame_count;
       document.querySelector('#viewer').href = `/viewer?session=${encodeURIComponent(sessionId)}`;
     }
     document.querySelector('#load').onclick = () => { sessionId = input.value.trim(); history.replaceState(null,'',`?session=${encodeURIComponent(sessionId)}`); refresh(); };

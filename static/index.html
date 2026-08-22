@@ -29,6 +29,7 @@
     #motion.show { transform: none; opacity: 1; }
     #toast { position: fixed; z-index: 5; inset: 0; display: grid; place-items: center; padding: 30px; background: #050608eb; text-align: center; font-size: 18px; line-height: 1.5; }
     #toast[hidden] { display: none; }
+    #toast-action { margin-top: 28px; padding: 14px 20px; border: 0; border-radius: 99px; background: #74f2ba; color: #06100c; font: inherit; font-weight: 900; }
   </style>
 </head>
 <body>
@@ -44,7 +45,7 @@
   </main>
   <div class="guidance"><strong id="headline">Walk a short arc around the room</strong><span id="detail">Move sideways while aiming at walls and furniture.</span></div>
   <div id="motion">WALK SIDEWAYS<br><small>Rotating in place cannot create depth.</small></div>
-  <div id="toast" hidden></div>
+  <div id="toast" hidden><div><div id="toast-message"></div><button id="toast-action" type="button">SCAN ANOTHER AREA</button></div></div>
   <script type="module" src="/static/app.js"></script>
 </body>
 </html>

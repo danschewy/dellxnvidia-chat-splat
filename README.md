@@ -10,14 +10,27 @@ Each scan lives under one directory:
 
 ```text
 session/<id>/
+  uploads/<client>.mp4 # original phone video (webm/mov also accepted)
   frames/*.jpg
   points.ply
   cameras.json
   splat.ply          # optional
   meta.json
+  current.json       # atomic pointer to the active immutable revision
+  models/<version>/  # matching points/cameras/meta generation
 ```
 
 Frames are written before masking; masked/resized derivatives live under `work/`. `points.ply` and `cameras.json` are atomically written before splat training begins. A gsplat failure is recorded in `meta.json` and does not remove them.
+
+Phone capture is video-first. The browser records one 15-second clip and sends it as one WebSocket binary upload. The server persists that original under `uploads/`, queues OpenCV/FFmpeg decoding in the background, samples at `capture_fps`, divides the clip into temporal windows, and keeps the sharpest frame in each window. That preserves bridge views instead of selecting twenty similar sharp frames from one moment. Browsers without a usable `MediaRecorder` automatically fall back to the original client-side JPEG flow with the same temporal selection policy.
+
+With `live_updates` enabled, every completed capture marks its session dirty. ROOMSCAN waits `live_update_debounce_seconds` for nearby clips to batch together, but `live_update_max_wait_seconds` forces a rebuild even when clips keep arriving. A clip completed during reconstruction schedules exactly one follow-up pass. Each model builds in a private staging directory and is published as an immutable revision; `current.json` atomically switches the viewer to matching point-cloud and camera files. Open viewers poll `model_version` and swap to the new cloud and camera path without a page reload.
+
+Automatic publication also checks camera continuity inside each phone clip. A clearly discontinuous rebuild cannot replace an already-published revision that passed the check: the status page reports `HELD`, the last good shared model remains visible, and a new clip can trigger another attempt. First models and explicit **Rebuild now** requests are never blocked by this heuristic.
+
+The process keeps one shared backend instance, so VGGT and YOLO weights remain loaded across live revisions. A bounded global inference queue serializes reconstructions across sessions on the single GPU. Video decoding remains separately bounded by `video_worker_count`; uploaded video is capped by bytes, duration, source FPS, and sampled-frame count, JPEG fallback is capped by frame count, and stalled WebSockets time out. Only `model_revision_retention` immutable model generations are retained per session (three by default), including the active revision and a rollback window.
+
+The root-level files remain for CLI/offline compatibility, but a live reader must resolve `current.json` and read the matching immutable `models/<version>/` directory. That is the transaction boundary used by the browser; reading root `points.ply` and `cameras.json` concurrently with publication is not guaranteed to return the same generation.
 
 ## Mac setup (Apple Silicon)
 
@@ -130,7 +143,9 @@ If PyTorch CUDA, the installed toolkit, and the driver are incompatible, fix tha
 python reconstruct.py /path/to/images /path/to/output
 ```
 
-The longest image edge is resized to 518 before VGGT. At most 32 evenly spaced frames are used by default. A CUDA/MPS OOM halves the frame set and retries down to four frames. `confidence_threshold` is a 0–1 rejected percentile because VGGT confidence is not normalized; `0.5` keeps the higher-confidence half of finite points. When people masking is enabled, the dilated image masks also exclude the corresponding dense 3D points before confidence filtering and splat initialization.
+VGGT input is prepared once at its native 518-pixel size. The production `crop` mode follows [Meta's official VGGT loader](https://github.com/facebookresearch/vggt/blob/main/vggt/utils/load_fn.py): resize portrait captures to 518 pixels wide, then center-crop to 518×518. Do not first shrink the longest edge of a portrait phone frame; doing so discards horizontal detail and can produce unstable poses and melted planar geometry. `pad` remains configurable for controlled comparisons but was materially worse on the test video.
+
+At most 32 evenly spaced frames are used by default. A CUDA/MPS OOM halves the frame set and retries down to four frames. `confidence_threshold` is a 0–1 rejected percentile because VGGT confidence is not normalized; `0.5` keeps the higher-confidence half of finite points. When people masking is enabled, the dilated image masks also exclude the corresponding dense 3D points before confidence filtering and splat initialization.
 
 Every stage logs wall-clock seconds and updates `meta.json`. All operational knobs—including masking, frame caps, upload limits, motion heuristic, and splat training—live in `config.json`.
 
@@ -139,11 +154,13 @@ Every stage logs wall-clock seconds and updates `meta.json`. All operational kno
 1. Start the HTTPS server on the box and open `/status?session=demo` on the presentation browser.
 2. Put `https://<box-host>:8443/?session=demo` in a QR code.
 3. Have five phones scan it. Each person presses **START**, grants camera/motion permission, and walks sideways in a short arc for 15 seconds. A red warning appears when motion looks like rotation without translation.
-4. Confirm roughly 20 frames per phone on the status page. Upload completion never starts reconstruction automatically.
-5. Press **Reconstruct** once. Watch stage times in stdout. Open the viewer as soon as `viewer_ready` becomes true; `points.ply` is usable even if the optional 3,000-iteration splat is still training or fails.
+4. Watch clips enter the video queue and become ready at roughly 20 selected frames per phone. Nearby completions are batched; continuous arrivals force a snapshot after the configured maximum wait.
+5. Watch stage times in stdout. Open the viewer as soon as `viewer_ready` becomes true; it refreshes to each safely published revision automatically. **Rebuild now** remains available as a manual fallback when the queue is idle.
 6. The viewer should show a recognizable occupied room within 90 seconds of the last upload, with people removed, and start on the recovered-camera flythrough. Use free orbit only as a secondary check.
 
 The acceptance run must be performed on CUDA. Stub verification proves the capture/server/viewer contract, not reconstruction quality. MPS verification proves only that imports and a small forward pass can execute.
+
+The 15 seconds is a per-clip latency budget, not a session limit. A phone may submit another clip immediately; every capture gets a unique client/capture ID and joins the shared reconstruction. Stand roughly 1–3 meters from the surfaces being scanned, keep each surface visible across several overlapping angles, and translate sideways rather than panning from one spot. Black or missing regions in the viewer mean there was no confident geometry there—record the next clip while facing that region and include overlap with a part that already reconstructs well.
 
 ## Tests
 
@@ -151,4 +168,4 @@ The acceptance run must be performed on CUDA. Stub verification proves the captu
 ROOMSCAN_BACKEND=stub python -m unittest discover -s tests -v
 ```
 
-The suite checks fixture validity, backend selection without ML dependencies, durable late-stage failure behavior, OOM subsampling, local-only viewer assets, WebSocket upload placement, manual triggering, and the complete stub pipeline.
+The suite checks fixture validity, backend selection without ML dependencies, one-pass portrait preprocessing, temporal video selection, camera-continuity quality gating, durable late-stage failure behavior, OOM subsampling, local-only viewer assets, WebSocket upload placement, manual triggering, immutable publication, and the complete stub pipeline.

@@ -26,7 +26,17 @@ class ContractTests(unittest.TestCase):
     def test_required_config_knobs_exist(self) -> None:
         required = {
             "max_frames", "vggt_resolution", "confidence_threshold", "blur_threshold",
+            "vggt_preprocess_mode",
             "frames_per_client", "mask_people", "gsplat_iterations", "point_size",
+            "frame_selection",
+            "video_upload", "video_bits_per_second", "max_video_upload_bytes",
+            "max_video_decode_seconds", "max_video_source_fps", "upload_timeout_seconds",
+            "video_worker_count", "live_update_train_splat",
+            "inference_queue_limit",
+            "quality_max_camera_step_ratio", "quality_min_camera_steps",
+            "model_revision_retention",
+            "live_updates", "live_update_debounce_seconds",
+            "live_update_max_wait_seconds", "viewer_refresh_seconds",
             "splat_max_screen_size", "splat_exposure", "weights_dir", "backend_override",
         }
         self.assertFalse(required - self.config.keys())
@@ -61,6 +71,21 @@ class ContractTests(unittest.TestCase):
     def test_even_subsample_keeps_endpoints(self) -> None:
         self.assertEqual(evenly_subsample(list(range(10)), 4), [0, 3, 6, 9])
 
+    def test_vggt_preprocessing_handles_portrait_once_at_native_resolution(self) -> None:
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("Pillow is only required by the real ML backends")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "portrait.jpg"
+            Image.new("RGB", (720, 1280), (40, 80, 120)).save(source)
+            crop = reconstruct._resize_for_vggt([source], root / "crop", 518, "crop")[0]
+            pad = reconstruct._resize_for_vggt([source], root / "pad", 518, "pad")[0]
+            with Image.open(crop) as crop_image, Image.open(pad) as pad_image:
+                self.assertEqual(crop_image.size, (518, 518))
+                self.assertEqual(pad_image.size, (518, 518))
+
     def test_vggt_pose_inverse_flattens_and_restores_batch_axes(self) -> None:
         class ShapeOnlyTensor:
             def __init__(self, shape):
@@ -86,6 +111,24 @@ class ContractTests(unittest.TestCase):
 
         self.assertEqual(received_shapes, [(2, 3, 4)])
         self.assertEqual(inverted.shape, (1, 2, 4, 4))
+
+    def test_camera_quality_is_grouped_by_capture_and_detects_jumps(self) -> None:
+        def camera(frame, x):
+            return {
+                "frame": frame,
+                "T_wc": [[1, 0, 0, x], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
+            }
+
+        cameras = [camera(f"phone_a_{index:03d}.jpg", index * 0.1) for index in range(7)]
+        cameras += [camera(f"phone_b_{index:03d}.jpg", 50 + index * 0.1) for index in range(7)]
+        grouped = reconstruct._camera_path_quality(cameras, 8.0, 6)
+        self.assertTrue(grouped["continuous"])
+        self.assertEqual(grouped["evaluated_capture_count"], 2)
+
+        cameras[-1] = camera("phone_b_006.jpg", 70)
+        jumped = reconstruct._camera_path_quality(cameras, 8.0, 6)
+        self.assertFalse(jumped["continuous"])
+        self.assertEqual(jumped["worst_capture"], "phone_b")
 
     def test_gsplat_background_shape_matches_packing_mode(self) -> None:
         self.assertEqual(_background_shape(True, camera_count=1), (3,))
