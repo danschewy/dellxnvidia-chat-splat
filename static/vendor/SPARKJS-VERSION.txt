@@ -1,0 +1,3 @@
+SparkJS 2.1.0
+Source: https://sparkjs.dev/releases/spark/2.1.0/spark.module.js
+SHA-256: c0355a962f68a6de9b13df69f05b1aba3614d9aec43a4504975daeb349126a8a

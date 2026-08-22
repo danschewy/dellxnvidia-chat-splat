@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#07090d">
+  <title>ROOMSCAN — Choose a room</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; --mint: #75f2bb; --ink: #07090d; --panel: #111722; --muted: #93a0b3; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; color: #f5f7fb; background: radial-gradient(circle at 80% -10%, #15332c 0, transparent 34rem), radial-gradient(circle at -10% 55%, #162338 0, transparent 32rem), var(--ink); }
+    body::before { content: ""; position: fixed; inset: 0; pointer-events: none; opacity: .13; background-image: linear-gradient(#fff1 1px, transparent 1px), linear-gradient(90deg, #fff1 1px, transparent 1px); background-size: 44px 44px; mask-image: linear-gradient(to bottom, #000, transparent 75%); }
+    header, main { position: relative; width: min(1180px, calc(100% - 36px)); margin-inline: auto; }
+    header { display: flex; justify-content: space-between; align-items: center; padding: max(24px, env(safe-area-inset-top)) 0 12px; }
+    .brand { font-size: 14px; font-weight: 950; letter-spacing: .22em; }
+    .backend { padding: 7px 10px; color: #b9c4d3; border: 1px solid #ffffff1f; border-radius: 99px; background: #0c1119c7; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+    .hero { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(320px, .85fr); gap: clamp(24px, 5vw, 74px); align-items: center; padding: clamp(50px, 9vh, 104px) 0 70px; }
+    .eyebrow { color: var(--mint); font-size: 12px; font-weight: 850; letter-spacing: .15em; text-transform: uppercase; }
+    h1 { max-width: 760px; margin: 12px 0 18px; font-size: clamp(48px, 7.5vw, 96px); line-height: .92; letter-spacing: -.065em; }
+    .intro { max-width: 620px; margin: 0; color: #b7c0ce; font-size: clamp(17px, 2vw, 21px); line-height: 1.55; }
+    .chooser { padding: 22px; border: 1px solid #ffffff1f; border-radius: 24px; background: linear-gradient(145deg, #151d29e8, #0d121be8); box-shadow: 0 30px 80px #0008; backdrop-filter: blur(18px); }
+    button, .button { min-height: 48px; border: 0; border-radius: 13px; padding: 0 17px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; color: #07100d; background: var(--mint); font: inherit; font-weight: 850; text-decoration: none; cursor: pointer; }
+    button:disabled { opacity: .55; cursor: wait; }
+    #new-room { width: 100%; min-height: 62px; font-size: 17px; }
+    .divider { display: flex; align-items: center; gap: 11px; margin: 20px 0; color: #748094; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; }
+    .divider::before, .divider::after { content: ""; height: 1px; flex: 1; background: #ffffff17; }
+    form { display: flex; gap: 9px; }
+    input { min-width: 0; flex: 1; min-height: 50px; padding: 0 14px; border: 1px solid #ffffff25; border-radius: 12px; outline: none; color: #fff; background: #070a10c9; font: inherit; }
+    input:focus { border-color: #75f2bb8f; box-shadow: 0 0 0 3px #75f2bb16; }
+    form button { color: #edf4ff; background: #263144; }
+    #join-error { min-height: 18px; margin: 9px 2px 0; color: #ff8d94; font-size: 12px; }
+    .rooms-heading { display: flex; align-items: end; justify-content: space-between; gap: 20px; margin-bottom: 18px; }
+    h2 { margin: 0; font-size: clamp(25px, 4vw, 38px); letter-spacing: -.035em; }
+    #room-summary { color: var(--muted); font-size: 13px; }
+    #rooms { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; padding-bottom: max(70px, env(safe-area-inset-bottom)); }
+    .room { overflow: hidden; border: 1px solid #ffffff1b; border-radius: 20px; background: #101620e8; box-shadow: 0 18px 50px #0004; }
+    .thumb { position: relative; aspect-ratio: 16 / 10; overflow: hidden; background: radial-gradient(circle at 65% 35%, #285b4b, transparent 30%), linear-gradient(135deg, #1e2b3c, #0a0e15); }
+    .thumb::after { content: ""; position: absolute; inset: 0; background: linear-gradient(transparent 50%, #090d14d9); }
+    .thumb img { width: 100%; height: 100%; object-fit: cover; }
+    .state { position: absolute; z-index: 1; left: 12px; bottom: 11px; padding: 6px 9px; border: 1px solid #ffffff24; border-radius: 99px; color: #eaf1fb; background: #071018c9; font-size: 10px; font-weight: 800; letter-spacing: .07em; text-transform: uppercase; backdrop-filter: blur(8px); }
+    .state.ready { color: #07100d; border-color: transparent; background: var(--mint); }
+    .room-body { padding: 15px; }
+    .room-title { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+    h3 { overflow: hidden; margin: 0; font-size: 18px; white-space: nowrap; text-overflow: ellipsis; }
+    time { color: #778397; font-size: 11px; white-space: nowrap; }
+    .code { margin-top: 5px; color: #7f8c9f; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .stats { display: flex; gap: 14px; margin: 14px 0 16px; color: #b4bfcd; font-size: 12px; }
+    .room-actions { display: flex; gap: 8px; }
+    .room-actions .button { min-height: 42px; flex: 1; font-size: 13px; }
+    .room-actions .secondary { color: #dce5f1; background: #202b3b; }
+    .room-actions .disabled { opacity: .38; pointer-events: none; }
+    #empty { grid-column: 1 / -1; padding: 44px; border: 1px dashed #ffffff25; border-radius: 20px; color: #8f9aac; text-align: center; }
+    @media (max-width: 900px) { .hero { grid-template-columns: 1fr; padding-top: 48px; } #rooms { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 620px) { header, main { width: min(100% - 24px, 1180px); } .hero { padding: 42px 0 52px; } h1 { font-size: clamp(48px, 16vw, 70px); } form { flex-direction: column; } #rooms { grid-template-columns: 1fr; } .rooms-heading { align-items: start; flex-direction: column; gap: 7px; } }
+  </style>
+</head>
+<body>
+  <header><div class="brand">ROOMSCAN</div><div class="backend" id="backend">Checking box…</div></header>
+  <main>
+    <section class="hero">
+      <div>
+        <div class="eyebrow">Shared spatial capture</div>
+        <h1>Choose a room.</h1>
+        <p class="intro">Start a fresh scan or join people already capturing. Choose one distinctive corner as the shared landmark; every phone starts and finishes there, then walks a different sideways arc.</p>
+      </div>
+      <div class="chooser">
+        <button id="new-room" type="button">＋ New room scan</button>
+        <div class="divider">or join with a code</div>
+        <form id="join-form">
+          <input id="room-code" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="room-20260822-a1b2c3 or link" aria-label="Room code or link">
+          <button type="submit">Join</button>
+        </form>
+        <div id="join-error" role="alert"></div>
+      </div>
+    </section>
+    <section aria-labelledby="rooms-title">
+      <div class="rooms-heading"><h2 id="rooms-title">Existing rooms</h2><div id="room-summary">Loading rooms…</div></div>
+      <div id="rooms"><div id="empty">Looking for captures on this box…</div></div>
+    </section>
+  </main>
+  <script type="module" src="/static/lobby.js"></script>
+</body>
+</html>

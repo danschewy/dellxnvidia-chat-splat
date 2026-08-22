@@ -100,15 +100,21 @@ def load_pi3(weights_dir: Path, device: str) -> Any:
     return model.eval().to(device)
 
 
-def import_gsplat_checked() -> Any:
+def _ensure_interpreter_bin_on_path() -> None:
     # gsplat's lazy CUDA build shells out to `ninja`. Calling a virtualenv's
     # Python by absolute path does not necessarily put that virtualenv's bin
     # directory on PATH (common under nohup/systemd), even when Ninja is
-    # installed in the environment.
-    interpreter_bin = str(Path(sys.executable).resolve().parent)
+    # installed in the environment. Do not resolve the Python symlink here:
+    # that changes ``.venv/bin/python`` into ``/usr/bin/python`` and loses the
+    # directory containing the virtualenv's Ninja executable.
+    interpreter_bin = str(Path(sys.executable).parent)
     path_entries = [entry for entry in os.environ.get("PATH", "").split(os.pathsep) if entry]
     if interpreter_bin not in path_entries:
         os.environ["PATH"] = os.pathsep.join([interpreter_bin, *path_entries])
+
+
+def import_gsplat_checked() -> Any:
+    _ensure_interpreter_bin_on_path()
     try:
         import gsplat
         from gsplat import rasterization

@@ -1,6 +1,6 @@
 # ROOMSCAN
 
-ROOMSCAN turns frames from several phones into a shared colored point cloud and, when CUDA/gsplat is healthy, an optional Gaussian splat. The browser viewer starts with a flythrough that stays on line segments between recovered camera poses, so it never invents a path outside the capture volume.
+ROOMSCAN turns frames from several phones into a shared colored point cloud and, when CUDA/gsplat is healthy, an optional Gaussian splat. The browser renders real splats with the locally vendored SparkJS renderer and falls back to Three.js points when no splat exists. It starts with a flythrough along one coherent recovered clip and reverses at its endpoints, so it never invents a path through empty space between phones.
 
 The system is deliberately usable without an ML environment: `StubBackend` reconstructs the complete fixture scene in a fraction of a second. CUDA, MPS, and stub all write the same disk contract.
 
@@ -24,7 +24,9 @@ Frames are written before masking; masked/resized derivatives live under `work/`
 
 Phone capture is video-first. The browser records one 15-second clip and sends it as one WebSocket binary upload. The server persists that original under `uploads/`, queues OpenCV/FFmpeg decoding in the background, samples at `capture_fps`, divides the clip into temporal windows, and keeps the sharpest frame in each window. That preserves bridge views instead of selecting twenty similar sharp frames from one moment. Browsers without a usable `MediaRecorder` automatically fall back to the original client-side JPEG flow with the same temporal selection policy.
 
-With `live_updates` enabled, every completed capture marks its session dirty. ROOMSCAN waits `live_update_debounce_seconds` for nearby clips to batch together, but `live_update_max_wait_seconds` forces a rebuild even when clips keep arriving. A clip completed during reconstruction schedules exactly one follow-up pass. Each model builds in a private staging directory and is published as an immutable revision; `current.json` atomically switches the viewer to matching point-cloud and camera files. Open viewers poll `model_version` and swap to the new cloud and camera path without a page reload.
+The server root is the room lobby. **New room scan** creates a filesystem-backed session and opens its capture page; a room code or full invite URL joins an existing session. Existing-room cards are newest-first and use the latest captured frame as their thumbnail. Direct QR links keep the stable `/?session=<room-id>` capture contract, and **View room** opens the shared reconstruction when one has been published.
+
+With `live_updates` enabled, every completed capture marks its session dirty. ROOMSCAN waits `live_update_debounce_seconds` for nearby clips to batch together, but `live_update_max_wait_seconds` forces a rebuild even when clips keep arriving. A clip completed during reconstruction schedules exactly one follow-up pass. Each model builds in a private staging directory and is published as an immutable revision; `current.json` atomically switches the viewer to matching point-cloud and camera files. Open viewers poll `model_version` and swap to the new cloud and camera path without a page reload. On the CUDA box, `live_update_train_splat` is enabled so each revision publishes its durable point cloud first and then upgrades to a Spark-rendered splat after gsplat completes; disable that knob only when trading visual quality for the shortest possible update latency.
 
 Automatic publication also checks camera continuity inside each phone clip. A clearly discontinuous rebuild cannot replace an already-published revision that passed the check: the status page reports `HELD`, the last good shared model remains visible, and a new clip can trigger another attempt. First models and explicit **Rebuild now** requests are never blocked by this heuristic.
 
@@ -65,6 +67,7 @@ source .venv/bin/activate
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install torch==2.11.0 torchvision==0.26.0 \
   --index-url https://download.pytorch.org/whl/cu130
+python -m pip install 'ninja>=1.11,<2'
 CUDA_HOME=/usr/local/cuda PATH="/usr/local/cuda/bin:$PATH" MAX_JOBS=4 \
   python -m pip install --no-build-isolation -r requirements-cuda.txt
 CUDA_HOME=/usr/local/cuda PATH="/usr/local/cuda/bin:$PATH" \
@@ -80,7 +83,7 @@ python /tmp/roomscan-get-pip.py
 
 `check_env.py` forces the gsplat CUDA module to load/build, rather than merely importing gsplat's lazy Python wrapper. On CUDA, a failure is printed as a loud M0 failure. Do not proceed to a live demo until the four-frame VGGT forward pass, YOLO load, and compiled gsplat module all report `OK`.
 
-The reference box run was verified on NVIDIA GB10, driver 580.159.03, CUDA toolkit 13.0.88, Python 3.12.3, and PyTorch 2.11.0+cu130. The 25-frame CUDA fixture produced 3,807,300 points and a 100,000-Gaussian splat in 34.03 seconds total. A separate 18-photo occupied-room run used the production 300,000-splat budget, removed 882,493 masked person pixels before geometry filtering, retained 1,386,310 room points, and completed in 33.78 seconds. Its recovered-camera flythrough was visually verified in Chrome.
+The reference box run was verified on NVIDIA GB10, driver 580.159.03, CUDA toolkit 13.0.88, Python 3.12.3, and PyTorch 2.11.0+cu130. The 25-frame CUDA fixture produced 3,807,300 points and a 100,000-Gaussian splat in 34.03 seconds total. A separate 18-photo occupied-room run used the production 300,000-splat budget, removed 882,493 masked person pixels before geometry filtering, retained 1,386,310 room points, and completed in 33.78 seconds. The final 20-frame portrait-video run retained a bounded 1,000,000-point cloud, trained 300,000 initialized Gaussians for 3,000 iterations, and completed in 42.69 seconds with the 518×616 balanced input. Its Spark-rendered recovered-camera flythrough was visually verified in Chrome with no console errors.
 
 Run the production server with certificate paths supplied by the environment:
 
@@ -93,6 +96,7 @@ python server.py --host 0.0.0.0 --port 8443
 ```
 
 No runtime downloads are allowed. `models.py` enables Hugging Face/Transformers offline modes and resolves only local paths.
+The viewer is offline too: Three.js and SparkJS 2.1.0 are committed under `static/vendor/`; it never imports a CDN module at runtime.
 
 ## Pre-download weights on a connected staging machine
 
@@ -130,7 +134,8 @@ Do this at M0, not during the demo:
 source .venv/bin/activate
 python -c "import torch; print(torch.__version__, torch.version.cuda); print(torch.cuda.get_device_name())"
 nvcc --version
-MAX_JOBS=4 pip install --no-build-isolation --force-reinstall 'gsplat>=1.5,<2'
+python -m pip install 'ninja>=1.11,<2'
+MAX_JOBS=4 python -m pip install --no-build-isolation --force-reinstall 'gsplat>=1.5,<2'
 python -c "from gsplat.cuda._backend import _C; assert _C is not None; print(_C)"
 python check_env.py
 ```
@@ -143,9 +148,9 @@ If PyTorch CUDA, the installed toolkit, and the driver are incompatible, fix tha
 python reconstruct.py /path/to/images /path/to/output
 ```
 
-VGGT input is prepared once at its native 518-pixel size. The production `crop` mode follows [Meta's official VGGT loader](https://github.com/facebookresearch/vggt/blob/main/vggt/utils/load_fn.py): resize portrait captures to 518 pixels wide, then center-crop to 518×518. Do not first shrink the longest edge of a portrait phone frame; doing so discards horizontal detail and can produce unstable poses and melted planar geometry. `pad` remains configurable for controlled comparisons but was materially worse on the test video.
+VGGT input is prepared once at its native 518-pixel width and then loaded directly without a second resize or crop. The production `crop` mode follows [Meta's official VGGT loader](https://github.com/facebookresearch/vggt/blob/main/vggt/utils/load_fn.py) for width and patch alignment, but raises the configurable portrait cap to `vggt_portrait_height` (616 pixels on the GB10) instead of forcing every portrait frame to 518×518. On the 720×1280 test clip this preserves about 67% of the vertical field rather than 56%, while remaining inside the latency budget. `pad` preserves every pixel but reduces portrait horizontal content to roughly 294 pixels and was materially worse on the test video. Landscape capture remains preferred because it preserves the complete vertical field without padding.
 
-At most 32 evenly spaced frames are used by default. A CUDA/MPS OOM halves the frame set and retries down to four frames. `confidence_threshold` is a 0–1 rejected percentile because VGGT confidence is not normalized; `0.5` keeps the higher-confidence half of finite points. When people masking is enabled, the dilated image masks also exclude the corresponding dense 3D points before confidence filtering and splat initialization.
+At most 32 evenly spaced frames are used by default. A CUDA/MPS OOM halves the frame set and retries down to four frames. `confidence_threshold` is a 0–1 rejected percentile because VGGT confidence is not normalized. VGGT's confidence activation has an exact floor of `1.0`; ROOMSCAN preserves every point above the percentile boundary, then fills the remaining quota by sampling evenly across tied boundary values. `max_point_cloud_points` bounds that quota at one million by default. This avoids both extremes seen in difficult phone footage: retaining every one of millions of uncertain floor pixels, or retaining only thin high-confidence edges and losing wall coverage. An all-equal stub/model output is preserved unless it exceeds the configured cap. When people masking is enabled, the dilated image masks also exclude the corresponding dense 3D points before confidence filtering and splat initialization.
 
 Every stage logs wall-clock seconds and updates `meta.json`. All operational knobs—including masking, frame caps, upload limits, motion heuristic, and splat training—live in `config.json`.
 
@@ -153,14 +158,14 @@ Every stage logs wall-clock seconds and updates `meta.json`. All operational kno
 
 1. Start the HTTPS server on the box and open `/status?session=demo` on the presentation browser.
 2. Put `https://<box-host>:8443/?session=demo` in a QR code.
-3. Have five phones scan it. Each person presses **START**, grants camera/motion permission, and walks sideways in a short arc for 15 seconds. A red warning appears when motion looks like rotation without translation.
+3. Choose one distinctive shared landmark visible from much of the room: a poster, doorway corner, or high-contrast object. Tell every participant to hold the phone sideways, press **START**, hold that landmark in view for the first 2–3 seconds, then walk sideways in a short arc while filming nearby surfaces. They should return to the landmark for the final 3 seconds. A red warning appears for portrait capture or when motion looks like rotation without translation.
 4. Watch clips enter the video queue and become ready at roughly 20 selected frames per phone. Nearby completions are batched; continuous arrivals force a snapshot after the configured maximum wait.
 5. Watch stage times in stdout. Open the viewer as soon as `viewer_ready` becomes true; it refreshes to each safely published revision automatically. **Rebuild now** remains available as a manual fallback when the queue is idle.
 6. The viewer should show a recognizable occupied room within 90 seconds of the last upload, with people removed, and start on the recovered-camera flythrough. Use free orbit only as a secondary check.
 
 The acceptance run must be performed on CUDA. Stub verification proves the capture/server/viewer contract, not reconstruction quality. MPS verification proves only that imports and a small forward pass can execute.
 
-The 15 seconds is a per-clip latency budget, not a session limit. A phone may submit another clip immediately; every capture gets a unique client/capture ID and joins the shared reconstruction. Stand roughly 1–3 meters from the surfaces being scanned, keep each surface visible across several overlapping angles, and translate sideways rather than panning from one spot. Black or missing regions in the viewer mean there was no confident geometry there—record the next clip while facing that region and include overlap with a part that already reconstructs well.
+The 15 seconds is a per-clip latency budget, not a session limit. A phone may submit another clip immediately; every capture gets a unique client/capture ID and joins the shared reconstruction. Stand roughly 1–3 meters from surfaces, keep them visible across several overlapping angles, and translate sideways rather than panning from one spot. Do not walk straight toward a wall, whip-pan, zoom, or cover the lens. Black or missing regions mean there was no confident geometry there: record the next clip facing that region, but start and finish on the shared landmark so ROOMSCAN can align it to the existing room. For floor coverage, use a second low sideways arc aimed slightly downward; bags, chairs, and people must be seen around from another angle because masking cannot invent the floor behind them.
 
 ## Tests
 

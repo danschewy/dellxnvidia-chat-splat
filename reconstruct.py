@@ -15,6 +15,17 @@ import time
 from typing import Any, Callable, Iterator, Sequence
 
 from backends import Backend, ReconstructionResult, select_backend
+from multiphone import (
+    DenseSubmap,
+    align_submaps,
+    concatenate_reconstructions,
+    frame_identity,
+    group_images_by_capture,
+    group_images_by_device,
+    identity_similarity,
+    select_capture_aware,
+    transform_reconstruction,
+)
 from roomscan_io import atomic_write_bytes, atomic_write_json, evenly_subsample, list_images, load_config, write_points_ply
 
 
@@ -65,6 +76,7 @@ def _resize_for_vggt(
     out_dir: Path,
     resolution: int,
     mode: str,
+    portrait_height: int | None = None,
 ) -> list[Path]:
     try:
         from PIL import Image, ImageOps
@@ -72,6 +84,9 @@ def _resize_for_vggt(
         raise RuntimeError("Pillow is required for CUDA/MPS image preparation") from exc
     if mode not in {"crop", "pad"}:
         raise ValueError("vggt_preprocess_mode must be crop or pad")
+    portrait_height = resolution if portrait_height is None else portrait_height
+    if portrait_height < resolution or portrait_height % 14:
+        raise ValueError("vggt_portrait_height must be >= vggt_resolution and divisible by 14")
     out_dir.mkdir(parents=True, exist_ok=True)
     outputs = []
     for source in images:
@@ -87,9 +102,9 @@ def _resize_for_vggt(
                 image = image.resize(
                     (target_width, target_height), Image.Resampling.BICUBIC
                 )
-                if target_height > resolution:
-                    top = (target_height - resolution) // 2
-                    image = image.crop((0, top, resolution, top + resolution))
+                if target_height > portrait_height:
+                    top = (target_height - portrait_height) // 2
+                    image = image.crop((0, top, resolution, top + portrait_height))
             else:
                 if width >= height:
                     target_width = resolution
@@ -179,13 +194,22 @@ def _reconstruct_with_backoff(
                 pass
 
 
-def _filter_points(result: ReconstructionResult, threshold: float) -> ReconstructionResult:
+def _filter_points(
+    result: ReconstructionResult,
+    threshold: float,
+    max_points: int | None = None,
+) -> ReconstructionResult:
     if not 0.0 <= threshold < 1.0:
         raise ValueError("confidence_threshold must be in [0, 1)")
+    if max_points is not None and max_points < 1:
+        raise ValueError("max_point_cloud_points must be positive")
     try:
         import numpy as np
     except ImportError:
         keep = [index for index, value in enumerate(result.confidences) if float(value) >= threshold]
+        if max_points is not None and len(keep) > max_points:
+            step = (len(keep) - 1) / max(max_points - 1, 1)
+            keep = [keep[round(index * step)] for index in range(max_points)]
         return ReconstructionResult(
             points=[result.points[index] for index in keep],
             colors=[result.colors[index] for index in keep],
@@ -200,10 +224,34 @@ def _filter_points(result: ReconstructionResult, threshold: float) -> Reconstruc
     if not len(valid_conf):
         raise ValueError("VGGT produced no finite points")
     # VGGT confidence is not normalized. The 0..1 knob is the percentile
-    # rejected, matching the upstream VGGT visualizer's convention.
-    cutoff = np.quantile(valid_conf, threshold)
-    keep = finite & (confidences >= cutoff)
-    return ReconstructionResult(points[keep], colors[keep], confidences[keep], result.cameras)
+    # rejected, matching the upstream VGGT visualizer's convention. Difficult
+    # footage commonly has millions of values tied at VGGT's exact 1.0 floor.
+    # Select an exact bounded count: keep every value above the boundary, then
+    # fill the remaining quota evenly across the tie. This preserves wall
+    # coverage without accidentally retaining every floor-saturated pixel.
+    valid_indices = np.flatnonzero(finite)
+    all_equal = bool(np.all(valid_conf == valid_conf[0]))
+    desired = len(valid_indices) if all_equal else max(1, math.ceil(len(valid_indices) * (1 - threshold)))
+    if max_points is not None:
+        desired = min(desired, max_points)
+    if desired >= len(valid_indices):
+        selected = valid_indices
+    else:
+        boundary = np.partition(valid_conf, len(valid_conf) - desired)[len(valid_conf) - desired]
+        higher = valid_indices[valid_conf > boundary]
+        tied = valid_indices[valid_conf == boundary]
+        tie_count = desired - len(higher)
+        if tie_count >= len(tied):
+            selected_ties = tied
+        elif tie_count == 1:
+            selected_ties = tied[[len(tied) // 2]]
+        else:
+            tie_positions = np.linspace(0, len(tied) - 1, tie_count, dtype=np.int64)
+            selected_ties = tied[tie_positions]
+        selected = np.sort(np.concatenate((higher, selected_ties)))
+    return ReconstructionResult(
+        points[selected], colors[selected], confidences[selected], result.cameras
+    )
 
 
 def _camera_path_quality(
@@ -229,9 +277,9 @@ def _camera_path_quality(
             continue
         if not all(math.isfinite(value) for value in position):
             continue
-        frame = Path(str(camera.get("frame", index))).stem
-        prefix, separator, suffix = frame.rpartition("_")
-        capture = prefix if separator and suffix.isdigit() else "__sequence__"
+        frame = Path(str(camera.get("frame", index)))
+        identity = frame_identity(frame)
+        capture = identity.capture_id
         captures.setdefault(capture, []).append(position)
         all_positions.append(position)
 
@@ -311,6 +359,126 @@ def _exclude_masked_points(
     ), removed
 
 
+def _select_pipeline_inputs(
+    images: Sequence[Path], config: dict[str, Any], backend_name: str
+) -> tuple[list[Path], dict[str, Any]]:
+    device_groups = group_images_by_device(images)
+    use_submaps = (
+        bool(config["multi_device_submaps"])
+        and backend_name != "stub"
+        and len(device_groups) > 1
+    )
+    if not use_submaps:
+        selected = select_capture_aware(
+            images,
+            int(config["max_frames"]),
+            int(config["submap_frames_per_capture"]),
+        )
+        return selected, {
+            "mode": "single_sequence",
+            "devices": sorted(device_groups),
+            "selected_frames_by_device": {
+                device: sum(frame_identity(path).device_id == device for path in selected)
+                for device in device_groups
+            },
+        }
+
+    selected = []
+    selected_counts = {}
+    for device, paths in device_groups.items():
+        capture_groups = list(group_images_by_capture(paths).items())
+        chosen_captures = evenly_subsample(
+            capture_groups,
+            min(int(config["submaps_per_device"]), len(capture_groups)),
+        )
+        device_selection = []
+        for _capture, capture_paths in chosen_captures:
+            device_selection.extend(
+                select_capture_aware(
+                    capture_paths,
+                    int(config["submap_max_frames"]),
+                    int(config["submap_frames_per_capture"]),
+                )
+            )
+        selected.extend(device_selection)
+        selected_counts[device] = len(device_selection)
+    return selected, {
+        "mode": "per_capture_submaps",
+        "devices": sorted(device_groups),
+        "selected_frames_by_device": selected_counts,
+    }
+
+
+def _reconstruct_capture_submaps(
+    backend: Backend,
+    prepared: Sequence[Path],
+    masks_by_frame: dict[str, Any],
+    config: dict[str, Any],
+) -> tuple[ReconstructionResult, list[Path], int, dict[str, Any]]:
+    grouped = group_images_by_capture(prepared)
+    submaps = []
+    for capture, images in grouped.items():
+        dense, used_images = _reconstruct_with_backoff(backend, list(images))
+        submaps.append(
+            DenseSubmap(capture, frame_identity(images[0]).device_id, dense, used_images)
+        )
+
+    try:
+        transforms, alignment = align_submaps(submaps, config)
+    except BaseException as exc:
+        anchor = max(submaps, key=lambda item: (len(item.images), item.submap_id))
+        transforms = {anchor.submap_id: identity_similarity()}
+        alignment = {
+            "mode": "per_capture_submaps",
+            "anchor_submap": anchor.submap_id,
+            "anchor_device": anchor.device_id,
+            "submap_count": len(submaps),
+            "device_count": len({item.device_id for item in submaps}),
+            "aligned_submaps": [anchor.submap_id],
+            "skipped_submaps": sorted(
+                item.submap_id for item in submaps if item.submap_id != anchor.submap_id
+            ),
+            "aligned_devices": [anchor.device_id],
+            "skipped_devices": sorted(
+                {
+                    item.device_id
+                    for item in submaps
+                    if item.device_id != anchor.device_id
+                }
+            ),
+            "links": [],
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    by_submap = {submap.submap_id: submap for submap in submaps}
+    point_quota = max(1, int(config["max_point_cloud_points"]) // len(transforms))
+    aligned_reconstructions = []
+    aligned_images = []
+    removed_people_points = 0
+    for submap_id in alignment["aligned_submaps"]:
+        submap = by_submap[submap_id]
+        cleaned, removed = _exclude_masked_points(
+            submap.reconstruction,
+            [masks_by_frame.get(image.name) for image in submap.images],
+        )
+        cleaned = _filter_points(
+            cleaned,
+            float(config["confidence_threshold"]),
+            max_points=point_quota,
+        )
+        aligned_reconstructions.append(
+            transform_reconstruction(cleaned, transforms[submap_id])
+        )
+        aligned_images.extend(submap.images)
+        removed_people_points += removed
+    return (
+        concatenate_reconstructions(aligned_reconstructions),
+        aligned_images,
+        removed_people_points,
+        alignment,
+    )
+
+
 def run_pipeline(
     image_dir: Path,
     out_dir: Path,
@@ -336,9 +504,12 @@ def run_pipeline(
         with timed_stage(meta, "ingest"):
             all_images = list_images(image_dir)
             meta["input_frame_count"] = len(all_images)
-            selected = evenly_subsample(all_images, int(config["max_frames"]))
+            selected, selection = _select_pipeline_inputs(
+                all_images, config, backend.name
+            )
             frames = _copy_inputs(selected, out_dir / "frames")
             meta["selected_frame_count"] = len(frames)
+            meta["selection"] = selection
         _persist_meta(out_dir, meta)
 
         with timed_stage(meta, "resize"):
@@ -347,6 +518,7 @@ def run_pipeline(
                 out_dir / "work" / "resized",
                 int(config["vggt_resolution"]),
                 str(config["vggt_preprocess_mode"]),
+                portrait_height=int(config["vggt_portrait_height"]),
             )
         _persist_meta(out_dir, meta)
 
@@ -363,12 +535,41 @@ def run_pipeline(
         _persist_meta(out_dir, meta)
 
         with timed_stage(meta, "reconstruct"):
-            reconstruction, used_images = _reconstruct_with_backoff(backend, list(prepared))
-            reconstruction, removed_people_points = _exclude_masked_points(
-                reconstruction,
-                [masks_by_frame.get(image.name) for image in used_images],
-            )
-            reconstruction = _filter_points(reconstruction, float(config["confidence_threshold"]))
+            prepared_groups = group_images_by_device(prepared)
+            if (
+                meta["selection"]["mode"] == "per_capture_submaps"
+                and len(prepared_groups) > 1
+            ):
+                (
+                    reconstruction,
+                    used_images,
+                    removed_people_points,
+                    alignment,
+                ) = _reconstruct_capture_submaps(
+                    backend, prepared, masks_by_frame, config
+                )
+            else:
+                reconstruction, used_images = _reconstruct_with_backoff(
+                    backend, list(prepared)
+                )
+                reconstruction, removed_people_points = _exclude_masked_points(
+                    reconstruction,
+                    [masks_by_frame.get(image.name) for image in used_images],
+                )
+                reconstruction = _filter_points(
+                    reconstruction,
+                    float(config["confidence_threshold"]),
+                    max_points=int(config["max_point_cloud_points"]),
+                )
+                only_device = next(iter(prepared_groups), "__sequence__")
+                alignment = {
+                    "mode": "single_sequence",
+                    "anchor_device": only_device,
+                    "device_count": 1,
+                    "aligned_devices": [only_device],
+                    "skipped_devices": [],
+                    "links": [],
+                }
             write_points_ply(out_dir / "points.ply", reconstruction.points, reconstruction.colors)
             atomic_write_json(out_dir / "cameras.json", reconstruction.cameras)
             meta["selected_frame_count"] = len(used_images)
@@ -379,16 +580,24 @@ def run_pipeline(
                 float(config["quality_max_camera_step_ratio"]),
                 int(config["quality_min_camera_steps"]),
             )
-            warnings = []
+            warnings = [
+                f"unaligned_submap:{submap}"
+                for submap in alignment.get("skipped_submaps", [])
+            ]
+            blocking_warnings = []
             if not camera_quality["continuous"]:
-                warnings.append(
+                camera_warning = (
                     "camera_path_discontinuity: "
                     f"{camera_quality['worst_capture']} has step ratio "
                     f"{camera_quality['max_step_ratio']}"
                 )
+                warnings.append(camera_warning)
+                blocking_warnings.append(camera_warning)
             meta["quality"] = {
                 "camera_path": camera_quality,
+                "alignment": alignment,
                 "warnings": warnings,
+                "blocking_warnings": blocking_warnings,
             }
         _persist_meta(out_dir, meta)
         if geometry_ready is not None:
@@ -429,8 +638,18 @@ def main() -> int:
     parser.add_argument("image_dir", type=Path)
     parser.add_argument("out_dir", type=Path)
     parser.add_argument("--config", type=Path)
+    parser.add_argument(
+        "--no-splat",
+        action="store_true",
+        help="persist point geometry and cameras without running optional splat training",
+    )
     arguments = parser.parse_args()
-    run_pipeline(arguments.image_dir.resolve(), arguments.out_dir.resolve(), arguments.config)
+    run_pipeline(
+        arguments.image_dir.resolve(),
+        arguments.out_dir.resolve(),
+        arguments.config,
+        train_splat=not arguments.no_splat,
+    )
     return 0
 
 

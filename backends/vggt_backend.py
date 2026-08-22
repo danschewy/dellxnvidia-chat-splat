@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from . import ReconstructionResult
+from image_batch import load_prepared_image_batch
 from models import load_vggt, load_yolo
 from roomscan_io import resolve_weights_dir
 
@@ -50,19 +51,15 @@ class VggtBackend:
         import numpy as np
         import torch
         from vggt.utils.geometry import closed_form_inverse_se3
-        from vggt.utils.load_fn import load_and_preprocess_images
         from vggt.utils.pose_enc import pose_encoding_to_extri_intri
 
-        tensors = load_and_preprocess_images(
-            [str(path) for path in images],
-            mode=str(self.config["vggt_preprocess_mode"]),
-        ).to(self.device)
-        if tensors.shape[-1] > int(self.config["vggt_resolution"]) or tensors.shape[-2] > int(self.config["vggt_resolution"]):
-            tensors = torch.nn.functional.interpolate(
-                tensors,
-                size=(int(self.config["vggt_resolution"]), int(self.config["vggt_resolution"])),
-                mode="bilinear",
-                align_corners=False,
+        tensors = load_prepared_image_batch(images).to(self.device)
+        if (
+            tensors.shape[-1] > int(self.config["vggt_resolution"])
+            or tensors.shape[-2] > int(self.config["vggt_portrait_height"])
+        ):
+            raise ValueError(
+                f"Prepared VGGT batch exceeds configured bounds: {tuple(tensors.shape[-2:])}"
             )
         autocast = (
             torch.autocast(device_type="cuda", dtype=torch.bfloat16)

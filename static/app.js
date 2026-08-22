@@ -42,8 +42,8 @@ function resetForAnotherCapture() {
   count.hidden = true;
   count.textContent = String(config.capture_seconds);
   ring.style.strokeDashoffset = '527.8';
-  headline.textContent = 'Walk a short arc around the room';
-  detail.textContent = 'Move sideways while aiming at walls and furniture.';
+  headline.textContent = 'Start on the shared landmark';
+  detail.textContent = 'All phones: landscape, frame the same distinctive corner, then press START.';
 }
 
 async function requestMotionPermission() {
@@ -53,6 +53,19 @@ async function requestMotionPermission() {
       const state = await permissionType.requestPermission();
       if (state !== 'granted') throw new Error('Motion permission is required to check camera movement.');
     }
+  }
+}
+
+function updateCaptureWarning(pureRotation = false) {
+  const portraitVideo = video.videoHeight > video.videoWidth;
+  if (portraitVideo) {
+    motionWarning.innerHTML = 'TURN PHONE SIDEWAYS<br><small>Landscape keeps the floor and ceiling in view.</small>';
+    motionWarning.classList.add('show');
+  } else if (pureRotation) {
+    motionWarning.innerHTML = 'WALK SIDEWAYS<br><small>Rotating in place cannot create depth.</small>';
+    motionWarning.classList.add('show');
+  } else {
+    motionWarning.classList.remove('show');
   }
 }
 
@@ -69,7 +82,7 @@ function handleMotion(event) {
   translationSignal += accelerationMagnitude * dt;
   const oldEnough = performance.now() - captureStarted > 3000;
   const pureRotation = rotationTravel > config.motion_rotation_threshold && translationSignal < config.motion_translation_threshold;
-  motionWarning.classList.toggle('show', oldEnough && pureRotation);
+  updateCaptureWarning(oldEnough && pureRotation);
 }
 
 function blurScore(imageData) {
@@ -285,10 +298,11 @@ async function beginCapture() {
   captureStarted = performance.now();
   capturing = true;
   addEventListener('devicemotion', handleMotion);
+  updateCaptureWarning();
   startButton.hidden = true;
   count.hidden = false;
-  headline.textContent = 'Keep moving sideways';
-  detail.textContent = 'Aim steadily at walls, corners, and furniture.';
+  headline.textContent = 'Hold the shared landmark';
+  detail.textContent = 'Keep it steady for 2 seconds so every phone has an overlap anchor.';
   let videoRecording = null;
   try {
     videoRecording = startVideoRecording(stream);
@@ -303,6 +317,13 @@ async function beginCapture() {
     const tick = async (now) => {
       const elapsed = now - captureStarted;
       const progress = Math.min(elapsed / durationMs, 1);
+      if (elapsed >= 2500 && elapsed < durationMs - 3000) {
+        headline.textContent = 'Walk sideways through your arc';
+        detail.textContent = 'Keep nearby surfaces in view; translate instead of panning in place.';
+      } else if (elapsed >= durationMs - 3000) {
+        headline.textContent = 'Finish on the shared landmark';
+        detail.textContent = 'Return to the same corner or object to bridge this phone to the room.';
+      }
       ring.style.strokeDashoffset = String(527.8 * (1 - progress));
       count.textContent = String(Math.max(0, Math.ceil(config.capture_seconds - elapsed / 1000)));
       if (elapsed >= nextSample && elapsed < durationMs) {
@@ -332,12 +353,12 @@ async function beginCapture() {
     if (recordedVideo && recordedVideo.size > 0 && recordedVideo.size <= config.max_video_upload_bytes) {
       headline.textContent = 'Sending video to queue';
       await uploadVideo(recordedVideo, captureId);
-      showToast(`<strong>Video queued</strong><br>The server is selecting sharp frames for session <b>${sessionId}</b>.<br><br>You can put your phone away.`);
+      showToast(`<strong>Video queued</strong><br>The shared room will refresh after verified alignment.<br><br>Only add another clip for a missing area; begin and end it on the shared landmark.`);
     } else {
       headline.textContent = 'Selecting sharp frames';
       detail.textContent = `${passing}/${sharp.length} frames passed the sharpness target. Uploading fallback frames…`;
       const result = await uploadFrames(sharp, captureId);
-      showToast(`<strong>Upload complete</strong><br>${result.frames} sharp frames joined session <b>${sessionId}</b>.<br><br>You can put your phone away.`);
+      showToast(`<strong>Upload complete</strong><br>${result.frames} sharp frames joined session <b>${sessionId}</b>.<br><br>Scan another low arc for any dark floor or ceiling areas.`);
     }
   } catch (error) {
     showToast(`<strong>Upload failed</strong><br>${error.message}`, 'TRY AGAIN');

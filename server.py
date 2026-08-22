@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -49,7 +50,7 @@ class ReconstructionQualityHeld(RuntimeError):
 
 
 try:
-    from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+    from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
     from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
     from fastapi.staticfiles import StaticFiles
 except ImportError as exc:
@@ -70,8 +71,9 @@ def checked_id(value: str, label: str) -> str:
 
 
 @app.get("/")
-def capture_page() -> FileResponse:
-    return FileResponse(STATIC / "index.html")
+def home_page(request: Request) -> FileResponse:
+    page = "index.html" if request.query_params.get("session") else "lobby.html"
+    return FileResponse(STATIC / page)
 
 
 @app.get("/viewer")
@@ -163,6 +165,91 @@ def session_snapshot(session_id: str) -> dict[str, Any]:
         "live_updates": bool(config["live_updates"]),
         "update_pending": bool(update_state.get("dirty")),
     }
+
+
+def session_card(session_id: str) -> dict[str, Any]:
+    session_dir = SESSIONS / session_id
+    snapshot = session_snapshot(session_id)
+    frames = list((session_dir / "frames").glob("*.jpg"))
+    thumbnail = max(frames, key=lambda path: path.stat().st_mtime_ns) if frames else None
+    room = {}
+    room_path = session_dir / "room.json"
+    if room_path.is_file():
+        try:
+            room = json.loads(room_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            room = {}
+    artifacts = [path for path in (room_path, session_dir / "meta.json", thumbnail) if path]
+    updated_ns = max(
+        (path.stat().st_mtime_ns for path in artifacts if path.is_file()),
+        default=session_dir.stat().st_mtime_ns,
+    )
+    return {
+        "session_id": session_id,
+        "title": str(room.get("title") or session_id),
+        "created_at": room.get("created_at"),
+        "updated_at": datetime.fromtimestamp(
+            updated_ns / 1_000_000_000, tz=timezone.utc
+        ).isoformat(),
+        "thumbnail_url": (
+            f"/session/{session_id}/frames/{thumbnail.name}?v={thumbnail.stat().st_mtime_ns}"
+            if thumbnail else None
+        ),
+        "frame_count": snapshot["frame_count"],
+        "client_count": len(snapshot["clients"]),
+        "connected_clients": snapshot["connected_clients"],
+        "processing_videos": snapshot["processing_videos"],
+        "viewer_ready": snapshot["viewer_ready"],
+        "job_status": snapshot["job"].get("status", "idle"),
+        "update_pending": snapshot["update_pending"],
+        "capture_url": f"/?session={session_id}",
+        "viewer_url": f"/viewer?session={session_id}",
+        "status_url": f"/status?session={session_id}",
+    }
+
+
+@app.get("/api/sessions")
+def list_sessions() -> JSONResponse:
+    limit = int(config["session_list_limit"])
+    if limit < 1:
+        raise HTTPException(500, "session_list_limit must be positive")
+    cards = []
+    for directory in SESSIONS.iterdir():
+        if not directory.is_dir() or not SAFE_ID.fullmatch(directory.name):
+            continue
+        try:
+            cards.append(session_card(directory.name))
+        except OSError as exc:
+            print(f"[sessions] skipped {directory}: {exc}", flush=True)
+    cards.sort(key=lambda card: card["updated_at"], reverse=True)
+    return JSONResponse(
+        {"sessions": cards[:limit], "backend": startup_backend.name},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/api/sessions")
+def create_session() -> JSONResponse:
+    now = datetime.now(timezone.utc)
+    for _attempt in range(10):
+        session_id = f"room-{now:%Y%m%d}-{secrets.token_hex(3)}"
+        session_dir = SESSIONS / session_id
+        try:
+            session_dir.mkdir(parents=True, exist_ok=False)
+            break
+        except FileExistsError:
+            continue
+    else:
+        raise HTTPException(503, "Could not allocate a unique room code")
+    atomic_write_json(
+        session_dir / "room.json",
+        {
+            "session_id": session_id,
+            "title": f"Room {session_id.rsplit('-', 1)[-1].upper()}",
+            "created_at": now.isoformat(),
+        },
+    )
+    return JSONResponse(session_card(session_id), status_code=201)
 
 
 def process_video_upload(session_id: str, client_id: str, video_path: Path) -> bool:
@@ -358,7 +445,10 @@ def _reconstruct_job_locked(session_id: str, train_splat: bool, trigger: str) ->
     def publish_revision(build_dir: Path, include_splat: bool) -> None:
         nonlocal published_geometry
         build_meta = json.loads((build_dir / "meta.json").read_text(encoding="utf-8"))
-        build_warnings = build_meta.get("quality", {}).get("warnings", [])
+        build_quality = build_meta.get("quality", {})
+        build_warnings = build_quality.get(
+            "blocking_warnings", build_quality.get("warnings", [])
+        )
         current_path = session_dir / "current.json"
         previous_meta_path = session_dir / "meta.json"
         if (
@@ -372,10 +462,12 @@ def _reconstruct_job_locked(session_id: str, train_splat: bool, trigger: str) ->
             except (OSError, ValueError):
                 previous_meta = {}
             previous_quality = previous_meta.get("quality")
-            previous_warnings = (previous_quality or {}).get("warnings", [])
+            previous_warnings = (previous_quality or {}).get(
+                "blocking_warnings", (previous_quality or {}).get("warnings", [])
+            )
             if previous_quality is not None and not previous_warnings:
                 raise ReconstructionQualityHeld(
-                    "Automatic update held; the recovered camera path is discontinuous. "
+                    "Automatic update held; reconstruction quality checks failed. "
                     "The last good shared model remains active."
                 )
         version = str(time.time_ns())

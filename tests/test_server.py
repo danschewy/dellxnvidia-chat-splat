@@ -42,8 +42,8 @@ class ServerTests(unittest.TestCase):
         config = self.client.get("/api/config").json()
         self.assertEqual(config["capture_seconds"], 15)
         self.assertEqual(config["frames_per_client"], 20)
-        self.assertEqual(config["splat_max_screen_size"], 12.0)
-        self.assertEqual(config["splat_exposure"], 1.8)
+        self.assertEqual(config["splat_max_screen_size"], 512.0)
+        self.assertEqual(config["splat_exposure"], 1.0)
         self.assertTrue(config["video_upload"])
         self.assertEqual(config["video_bits_per_second"], 3_000_000)
         self.assertEqual(config["upload_timeout_seconds"], 30)
@@ -52,6 +52,26 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(server.config["video_worker_count"], 2)
         self.assertEqual(server.config["inference_queue_limit"], 4)
         self.assertEqual(server.config["model_revision_retention"], 3)
+
+    def test_home_lists_existing_rooms_and_can_create_a_new_room(self) -> None:
+        lobby = self.client.get("/")
+        capture = self.client.get(f"/?session={self.session_id}")
+        self.assertIn("Choose a room", lobby.text)
+        self.assertIn("Start on the shared landmark", capture.text)
+
+        created = self.client.post("/api/sessions")
+        self.assertEqual(created.status_code, 201)
+        room = created.json()
+        created_dir = server.SESSIONS / room["session_id"]
+        try:
+            self.assertTrue(created_dir.is_dir())
+            self.assertEqual(room["frame_count"], 0)
+            self.assertFalse(room["viewer_ready"])
+            self.assertEqual(room["capture_url"], f"/?session={room['session_id']}")
+            listed = self.client.get("/api/sessions").json()["sessions"]
+            self.assertIn(room["session_id"], {item["session_id"] for item in listed})
+        finally:
+            shutil.rmtree(created_dir, ignore_errors=True)
 
     def test_binary_websocket_upload_lands_in_contract(self) -> None:
         jpeg = (server.SAMPLE / "frames" / "frame_001.jpg").read_bytes()

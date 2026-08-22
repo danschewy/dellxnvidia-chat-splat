@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import io
 import math
 from pathlib import Path
 from typing import Any, Sequence
 
 from backends import ReconstructionResult
+from image_batch import load_prepared_image_batch
 
 
 def _logit(value: float) -> float:
@@ -21,6 +21,41 @@ def _background_shape(
     return (channels,) if packed else (camera_count, channels)
 
 
+def _encode_splat_ply(
+    means: Any,
+    sh0: Any,
+    opacity_logits: Any,
+    log_scales: Any,
+    quaternions: Any,
+) -> bytes:
+    """Encode standard 3DGS attributes as binary little-endian PLY."""
+    import numpy as np
+
+    count = len(means)
+    if not all(len(values) == count for values in (sh0, opacity_logits, log_scales, quaternions)):
+        raise ValueError("All splat attributes must have the same vertex count")
+    rows = np.zeros((count, 17), dtype="<f4")
+    rows[:, 0:3] = np.asarray(means, dtype=np.float32)
+    rows[:, 6:9] = np.asarray(sh0, dtype=np.float32)
+    rows[:, 9] = np.asarray(opacity_logits, dtype=np.float32)
+    rows[:, 10:13] = np.asarray(log_scales, dtype=np.float32)
+    rows[:, 13:17] = np.asarray(quaternions, dtype=np.float32)
+    properties = [
+        "x", "y", "z", "nx", "ny", "nz", "f_dc_0", "f_dc_1", "f_dc_2",
+        "opacity", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3",
+    ]
+    header_lines = [
+        "ply",
+        "format binary_little_endian 1.0",
+        "comment ROOMSCAN standard 3DGS",
+        f"element vertex {count}",
+        *(f"property float {property_name}" for property_name in properties),
+        "end_header",
+        "",
+    ]
+    return "\n".join(header_lines).encode("ascii") + rows.tobytes(order="C")
+
+
 def train_splat_bytes(
     config: dict[str, Any],
     poses: list[dict[str, Any]],
@@ -30,7 +65,6 @@ def train_splat_bytes(
     import numpy as np
     import torch
     from gsplat import rasterization
-    from vggt.utils.load_fn import load_and_preprocess_images
 
     if not poses or not images:
         raise ValueError("Splat training requires at least one posed image")
@@ -68,7 +102,7 @@ def train_splat_bytes(
     # Reuse VGGT's exact crop/resize transform so K and target pixels remain
     # aligned. Padding phone images to a square would require principal-point
     # offsets and roughly doubles attention/render work for 16:9 captures.
-    target_batch = load_and_preprocess_images([str(path) for path in images]).to(device)
+    target_batch = load_prepared_image_batch(images).to(device)
     source_height, source_width = target_batch.shape[-2:]
     requested_size = int(config["splat_train_resolution"])
     resize_scale = min(1.0, requested_size / max(source_height, source_width))
@@ -127,20 +161,4 @@ def train_splat_bytes(
     quats_np = torch.nn.functional.normalize(quats.detach(), dim=-1).cpu().numpy()
     opacity_np = opacity_logits.detach().cpu().numpy()
     sh0_np = (colors_np - 0.5) / 0.28209479177387814
-    out = io.StringIO()
-    properties = [
-        "x", "y", "z", "nx", "ny", "nz", "f_dc_0", "f_dc_1", "f_dc_2",
-        "opacity", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3",
-    ]
-    out.write("ply\nformat ascii 1.0\ncomment ROOMSCAN standard 3DGS\n")
-    out.write(f"element vertex {len(means_np)}\n")
-    for property_name in properties:
-        out.write(f"property float {property_name}\n")
-    out.write("end_header\n")
-    for index in range(len(means_np)):
-        row = [
-            *means_np[index], 0.0, 0.0, 0.0, *sh0_np[index], opacity_np[index],
-            *scales_np[index], *quats_np[index],
-        ]
-        out.write(" ".join(f"{float(value):.7g}" for value in row) + "\n")
-    return out.getvalue().encode("ascii")
+    return _encode_splat_ply(means_np, sh0_np, opacity_np, scales_np, quats_np)

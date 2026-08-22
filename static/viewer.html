@@ -21,7 +21,7 @@
     #mode { position: fixed; z-index: 2; bottom: max(18px, env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%); color: #9aa7b7; background: #0b0f16b8; border: 1px solid #ffffff14; border-radius: 99px; padding: 7px 12px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
     @media (max-width: 620px) { .bar { align-items: flex-start; } .controls { flex-direction: column; align-items: stretch; } label { display: flex; justify-content: space-between; gap: 8px; } }
   </style>
-  <script type="importmap">{"imports":{"three":"/static/vendor/three.module.js"}}</script>
+  <script type="importmap">{"imports":{"three":"/static/vendor/three.module.js","three/addons/":"/static/vendor/three-addons/","@sparkjsdev/spark":"/static/vendor/spark.module.js"}}</script>
 </head>
 <body>
   <div id="viewport"></div>
@@ -29,7 +29,7 @@
     <div class="brand">ROOMSCAN</div>
     <div class="controls">
       <button id="fly" type="button">Pause flythrough</button>
-      <label>Point size <input id="point-size" type="range" min="0.002" max="0.08" step="0.002" value="0.018"></label>
+      <label id="point-size-control">Point size <input id="point-size" type="range" min="0.002" max="0.08" step="0.002" value="0.004"></label>
     </div>
   </div>
   <div id="message">Loading reconstruction…</div>
